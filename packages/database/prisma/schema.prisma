@@ -78,6 +78,11 @@ enum QuotaSource {
   USER_INPUT
   OFFICIAL_API
 }
+enum ConversationStatus { ACTIVE PAUSED COMPLETED CANCELLED }
+enum ConversationRole { USER ASSISTANT SYSTEM TOOL }
+enum ConversationMode { ASK IMPLEMENT REVIEW CONTINUE VERIFY }
+enum ConversationMessageStatus { QUEUED RUNNING COMPLETED CANCELLED FAILED }
+enum ProviderSessionStatus { QUEUED RUNNING COMPLETED CANCELLED FAILED }
 
 model Project {
   id                String @id @default(cuid())
@@ -96,6 +101,82 @@ model Project {
   sessions          AgentSession[]
   auditEvents       AuditEvent[]
   approvals         Approval[]
+  conversations     Conversation[]
+}
+
+model Conversation {
+  id                String @id @default(cuid())
+  projectId         String
+  project           Project @relation(fields:[projectId],references:[id],onDelete:Cascade)
+  title             String
+  status            ConversationStatus @default(ACTIVE)
+  activeProviderId  String?
+  currentCheckpointId String?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  messages          ConversationMessage[]
+  providerSessions  ProviderSession[]
+  handoffCapsules   HandoffCapsule[]
+  routingDecisions  RoutingDecision[]
+  @@index([projectId,updatedAt])
+}
+model ConversationMessage {
+  id String @id @default(cuid())
+  conversationId String
+  conversation Conversation @relation(fields:[conversationId],references:[id],onDelete:Cascade)
+  role ConversationRole
+  providerId String?
+  providerSessionId String?
+  mode ConversationMode
+  content String
+  status ConversationMessageStatus @default(QUEUED)
+  handoffCapsuleId String?
+  taskId String?
+  createdAt DateTime @default(now())
+  @@index([conversationId,createdAt])
+}
+model ProviderSession {
+  id String @id @default(cuid())
+  conversationId String
+  conversation Conversation @relation(fields:[conversationId],references:[id],onDelete:Cascade)
+  providerId String
+  externalSessionId String?
+  status ProviderSessionStatus @default(QUEUED)
+  startedAt DateTime?
+  endedAt DateTime?
+  lastMessageId String?
+  @@index([conversationId,providerId,startedAt])
+}
+model HandoffCapsule {
+  id String @id @default(cuid())
+  conversationId String
+  conversation Conversation @relation(fields:[conversationId],references:[id],onDelete:Cascade)
+  fromProviderId String
+  toProviderId String
+  version Int
+  objective String
+  relevantDecisions Json
+  filesChanged Json
+  gitBaseline Json
+  gitDiffSummary String
+  tests Json
+  unresolvedIssues Json
+  acceptedFindings Json
+  sourceMessageRange Json
+  checksum String
+  createdAt DateTime @default(now())
+  @@unique([conversationId,version])
+}
+model RoutingDecision {
+  id String @id @default(cuid())
+  conversationId String
+  conversation Conversation @relation(fields:[conversationId],references:[id],onDelete:Cascade)
+  requestedProviderId String?
+  selectedProviderId String
+  reason String
+  providerHealthSnapshot Json
+  createdAt DateTime @default(now())
+  @@index([conversationId,createdAt])
 }
 
 model ProviderHealth {
