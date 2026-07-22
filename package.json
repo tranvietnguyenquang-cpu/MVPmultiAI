@@ -16,6 +16,9 @@
     "test": "vitest run",
     "test:unit": "vitest run packages",
     "test:integration": "vitest run apps",
+    "test:e2e": "vitest run apps --testNamePattern=e2e",
+    "test:all": "npm run typecheck && npm run lint && npm run test:unit && npm run test:integration && npm run test:e2e && npm run build",
+    "verify:mvp": "tsx scripts/verify-mvp.ts",
     "smoke:codex": "tsx scripts/smoke-provider.ts codex-cli",
     "smoke:claude": "tsx scripts/smoke-provider.ts claude-cli",
     "db:generate": "prisma generate --schema packages/database/prisma/schema.prisma",
@@ -36,6 +39,7 @@
   "devDependencies": {
     "@eslint/js": "9.34.0",
     "@types/node": "22.17.2",
+    "cross-spawn": "7.0.6",
     "eslint": "9.34.0",
     "eslint-config-next": "16.2.11",
     "npm-run-all": "4.1.5",

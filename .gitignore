@@ -7,6 +7,7 @@ dist/
 coverage/
 *.log
 .project-relay/
+.validation-workspace/
 
 
 .env.*
