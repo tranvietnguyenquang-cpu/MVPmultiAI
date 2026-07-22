@@ -22,4 +22,6 @@ npm run smoke:claude
 
 Project registration selects server-owned command IDs; browser input cannot define executables or arguments. Claude review and verification sessions are read-only and require an explicit user action. Providers never call one another autonomously.
 
+The worker is intentionally not a Docker service: run it natively on Windows as the same signed-in user who authenticated the local Codex and Claude CLIs. Provider health is metadata only; unsupported quota values render as “Exact quota unavailable.”
+
 See `docs/PRODUCT_SPEC.md`, `docs/ARCHITECTURE.md`, and `docs/IMPLEMENTATION_PLAN.md` for product and system details.

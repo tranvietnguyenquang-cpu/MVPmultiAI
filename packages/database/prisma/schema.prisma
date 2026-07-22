@@ -63,6 +63,21 @@ enum ApprovalStatus {
   APPROVED
   REJECTED
 }
+enum ProviderAuthenticationStatus {
+  AUTHENTICATED
+  NOT_AUTHENTICATED
+  RATE_LIMITED
+  NETWORK_ERROR
+  CLI_ERROR
+  UNKNOWN
+}
+enum QuotaSource {
+  CLI_STATUS
+  PROVIDER_RESPONSE
+  LOCAL_ESTIMATE
+  USER_INPUT
+  OFFICIAL_API
+}
 
 model Project {
   id                String @id @default(cuid())
@@ -81,6 +96,39 @@ model Project {
   sessions          AgentSession[]
   auditEvents       AuditEvent[]
   approvals         Approval[]
+}
+
+model ProviderHealth {
+  providerId            String @id
+  installed             Boolean @default(false)
+  version               String?
+  authentication        ProviderAuthenticationStatus @default(UNKNOWN)
+  available             Boolean @default(false)
+  latencyMs             Int?
+  lastChecked           DateTime?
+  lastAuthenticationCheck DateTime?
+  lastSuccessfulRequest DateTime?
+  lastRateLimitResponse DateTime?
+  resetAt               DateTime?
+  remainingPercent      Float?
+  quotaSource           QuotaSource @default(CLI_STATUS)
+  quotaConfidence       Confidence @default(LOW)
+  quotaExact            Boolean @default(false)
+  checkInProgress       Boolean @default(false)
+  checkStartedAt        DateTime?
+  updatedAt             DateTime @updatedAt
+}
+
+model ProviderHealthCheck {
+  id             String @id @default(cuid())
+  providerId     String
+  mode           String
+  authentication ProviderAuthenticationStatus
+  installed      Boolean
+  available      Boolean
+  latencyMs      Int?
+  createdAt      DateTime @default(now())
+  @@index([providerId, createdAt])
 }
 
 model Task {

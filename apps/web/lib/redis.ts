@@ -8,7 +8,9 @@ const connection = {
   ...(redisUrl.password ? { password: decodeURIComponent(redisUrl.password) } : {})
 };
 let sessionQueue: Queue<SessionJob, void, "run"> | undefined;
+let providerHealthQueue: Queue<{providerId:"codex-cli"|"claude-cli";mode:"refresh"|"auth"},void,"check">|undefined;
 export function getSessionQueue(): Queue<SessionJob, void, "run"> {
   if (!sessionQueue) sessionQueue = new Queue<SessionJob, void, "run">("agent-sessions", { connection });
   return sessionQueue;
 }
+export function getProviderHealthQueue(){if(!providerHealthQueue)providerHealthQueue=new Queue("provider-health",{connection});return providerHealthQueue;}

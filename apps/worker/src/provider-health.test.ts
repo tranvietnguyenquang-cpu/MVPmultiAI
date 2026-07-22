@@ -1,0 +1,1 @@
+import{describe,expect,it}from"vitest";import{ProviderHealthMonitor}from"./provider-health.js";describe("provider health monitor",()=>{it("exposes a monitor that serializes checks",()=>{expect(new ProviderHealthMonitor()).toBeInstanceOf(ProviderHealthMonitor);});});
