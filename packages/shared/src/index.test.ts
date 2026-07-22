@@ -1,3 +1,9 @@
-import { describe,expect,it } from "vitest"; import { approximateTokens,canVerify } from "./index.js";
+import { describe,expect,it } from "vitest"; import { approximateTokens,canVerify,commandSpecSchema,compactReviewCapsule,criterionAcceptsEvidence,findLockedDecisionConflicts } from "./index.js";
 describe("verification gate",()=>{it("requires successful evidence for every criterion",()=>{expect(canVerify([{evidence:[{successful:true}]},{evidence:[]}])).toBe(false);expect(canVerify([{evidence:[{successful:true}]},{evidence:[{successful:true}]}])).toBe(true);expect(canVerify([])).toBe(false);});});
 describe("token estimate",()=>{it("returns a conservative non-zero approximation",()=>{expect(approximateTokens({hello:"world"})).toBeGreaterThan(0);});});
+describe("review capsule",()=>{it("bounds source context",()=>{const capsule={task:{id:"1",title:"t",objective:"o",userRequest:"u"},architectureDecisions:[],codingRules:"x".repeat(5000),sourceContext:[{path:"a",summary:"x".repeat(3000)}],knownIssues:"",acceptanceCriteria:[],latestTestEvidence:[],prohibitedChanges:[]};expect(compactReviewCapsule(capsule).sourceContext[0]?.summary).toHaveLength(2000);});});
+describe("policy",()=>{
+  it("rejects browser-defined executables",()=>{expect(()=>commandSpecSchema.parse({id:"x",label:"x",executable:"powershell",args:[],category:"safe",evidenceKind:"COMMAND",timeoutMs:1000})).toThrow();});
+  it("enforces structured locked decision paths",()=>{expect(findLockedDecisionConflicts([{id:"ADR-1",forbiddenPaths:["src/legacy/**"],requiredPatterns:[]}],["src/legacy/a.ts"])).toEqual(["ADR-1: forbidden path src/legacy/**"]);});
+  it("never links evidence without an explicit kind and command mapping",()=>{const criterion={evidenceKinds:["TYPECHECK"],commandIds:["typecheck"]};expect(criterionAcceptsEvidence(criterion,{kind:"GIT_STATUS"})).toBe(false);expect(criterionAcceptsEvidence(criterion,{kind:"TYPECHECK",commandId:"other"})).toBe(false);expect(criterionAcceptsEvidence(criterion,{kind:"TYPECHECK",commandId:"typecheck"})).toBe(true);});
+});
