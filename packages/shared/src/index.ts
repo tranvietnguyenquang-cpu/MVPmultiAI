@@ -17,6 +17,10 @@ export const createProjectSchema = z.object({
   commandIds: z.array(z.enum(["test", "typecheck", "lint", "build"])).max(4).default(["test","typecheck","build"])
 });
 
+export const createConversationSchema = z.object({
+  title: z.string().trim().min(1).max(200)
+});
+
 export const acceptanceCriterionInputSchema = z.object({
   description: z.string().trim().min(1).max(1_000),
   evidenceKinds: z.array(z.enum(["CHANGED_FILES","GIT_DIFF","GIT_STATUS","TYPECHECK","LINT","UNIT_TEST","INTEGRATION_TEST","BUILD","MIGRATION","SCREENSHOT","ARTIFACT","COMMAND"])).min(1),
