@@ -21,6 +21,13 @@ export const createConversationSchema = z.object({
   title: z.string().trim().min(1).max(200)
 });
 
+export const createConversationMessageSchema = z.object({
+  content: z.string().trim().min(1).max(20_000),
+  provider: z.enum(["codex-cli", "claude-cli", "auto"]),
+  mode: z.enum(["ASK", "IMPLEMENT", "REVIEW", "CONTINUE", "VERIFY"]),
+  taskId: z.string().min(1).optional()
+});
+
 export const acceptanceCriterionInputSchema = z.object({
   description: z.string().trim().min(1).max(1_000),
   evidenceKinds: z.array(z.enum(["CHANGED_FILES","GIT_DIFF","GIT_STATUS","TYPECHECK","LINT","UNIT_TEST","INTEGRATION_TEST","BUILD","MIGRATION","SCREENSHOT","ARTIFACT","COMMAND"])).min(1),

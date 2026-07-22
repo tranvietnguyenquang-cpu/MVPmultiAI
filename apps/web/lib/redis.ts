@@ -14,3 +14,10 @@ export function getSessionQueue(): Queue<SessionJob, void, "run"> {
   return sessionQueue;
 }
 export function getProviderHealthQueue(){if(!providerHealthQueue)providerHealthQueue=new Queue("provider-health",{connection});return providerHealthQueue;}
+
+export type ConversationMessageJob = { sessionId: string; taskId: string; conversationId: string; messageId: string; providerId: string };
+let conversationMessageQueue: Queue<ConversationMessageJob, void, "route"> | undefined;
+export function getConversationMessageQueue(): Queue<ConversationMessageJob, void, "route"> {
+  if (!conversationMessageQueue) conversationMessageQueue = new Queue<ConversationMessageJob, void, "route">("conversation-messages", { connection });
+  return conversationMessageQueue;
+}
