@@ -10,6 +10,9 @@
 | Prisma migrate deploy | BLOCKED | Windows schema engine error before SQL |
 | Worker startup | BLOCKED | existing Redis responds `NOAUTH`; credentials unavailable |
 | Codex provider run | BLOCKED | executable access denied in sandbox |
+| Provider remediation typecheck/lint/tests/build | PASS | final verification run on 2026-07-22 |
+| Codex `CODEX_OK` smoke | BLOCKED | Windows app alias inaccessible in sandbox |
+| Claude `CLAUDE_OK` smoke | BLOCKED | Claude CLI not installed |
 
 ## Update — 2026-07-22T05:58:48Z
 - What changed: Recorded only checks actually executed.

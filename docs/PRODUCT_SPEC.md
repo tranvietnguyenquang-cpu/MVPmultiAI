@@ -36,7 +36,7 @@ A task may be `VERIFIED` only when every acceptance criterion has at least one s
 
 ## Security requirements
 
-Repository paths are canonicalized and must be absolute Git workspaces. Child paths must remain under the canonical workspace. Browser input selects command IDs, never shell text. Commands run without a shell, with a minimal environment, an allowlist, timeouts, cancellation, output limits, and secret redaction. Destructive command categories require a durable approval audit record. Provider credentials are never stored by ProjectRelay.
+Repository paths and candidate targets are realpath-canonicalized and must remain inside an absolute Git workspace, including across Windows junctions. Browser input selects server-owned command IDs, never executables, arguments, or shell text. Mutating routes require same-origin double-submit CSRF validation. Commands use a Windows-aware array launcher, a minimal environment, timeouts, cross-process cancellation, output limits, and stream-safe secret redaction. Destructive command categories require a durable approval record. Provider credentials remain owned by local CLIs and are never stored by ProjectRelay.
 
 ## MVP success criteria
 
@@ -45,4 +45,3 @@ Repository paths are canonicalized and must be absolute Git workspaces. Child pa
 - Session logs stream while running and contain no obvious secrets.
 - Git and command evidence can be traced to a task and acceptance criterion.
 - Lint, strict type-check, unit tests, and production build pass in a clean setup.
-

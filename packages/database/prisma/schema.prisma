@@ -68,7 +68,7 @@ model Project {
   id                String @id @default(cuid())
   name              String
   repositoryPath    String @unique
-  defaultProvider   String @default("codex")
+  defaultProvider   String @default("codex-cli")
   allowedCommands   Json
   permittedPaths    Json
   archivedAt        DateTime?
@@ -95,7 +95,9 @@ model Task {
   relevantFiles      Json
   constraints        Json
   prohibitedChanges  Json
-  assignedProvider   String @default("codex")
+  assignedProvider   String @default("codex-cli")
+  reviewRounds       Int @default(0)
+  remediationAttempts Int @default(0)
   activeSessionId    String?
   parentTaskId       String?
   parentTask         Task? @relation("TaskHierarchy", fields: [parentTaskId], references: [id])
@@ -107,6 +109,7 @@ model Task {
   sessions           AgentSession[]
   evidence           Evidence[]
   memoryUpdates      MemoryUpdate[]
+  reviewFindings     ReviewFinding[]
 }
 
 model AcceptanceCriterion {
@@ -114,6 +117,8 @@ model AcceptanceCriterion {
   taskId      String
   task        Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
   description String
+  evidenceKinds Json
+  commandIds Json
   passed      Boolean @default(false)
   evidence    Evidence[]
   createdAt   DateTime @default(now())
@@ -129,6 +134,8 @@ model Decision {
   consequences String
   status       DecisionStatus @default(PROPOSED)
   locked       Boolean @default(false)
+  forbiddenPaths Json
+  requiredPatterns Json
   createdBy    String
   createdAt    DateTime @default(now())
   supersededBy String?
@@ -158,9 +165,26 @@ model AgentSession {
   exitCode    Int?
   error       String?
   usage       Json?
+  baselineCommit String?
+  baselineDiffHash String?
+  purpose     String @default("IMPLEMENTATION")
+  readOnly    Boolean @default(false)
   createdAt   DateTime @default(now())
   events      AgentEvent[]
   evidence    Evidence[]
+}
+
+model ReviewFinding {
+  id          String @id @default(cuid())
+  taskId      String
+  task        Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  sessionId   String?
+  severity    String
+  title       String
+  body        String
+  status      String @default("PENDING")
+  stale       Boolean @default(false)
+  createdAt   DateTime @default(now())
 }
 
 model AgentEvent {

@@ -34,7 +34,9 @@ Initialization creates missing memory files only. Existing files are never repla
 
 ## Provider lifecycle
 
-The UI and task model depend on `CodingProvider`, never Codex details. `CodexCliProvider` checks availability, constructs a session, passes the capsule via stdin, emits normalized events, supports abort signals, and reports estimated usage. Future providers implement the same interface.
+The UI, task model, and worker resolve `CodingProvider` implementations through a registry keyed by `codex-cli` and `claude-cli`. Both providers delegate authentication to their installed CLI, stream normalized bounded/redacted events, support cancellation, and report usage when available. Codex is the implementer. Claude is restricted to read-only reviewer/verifier roles in both CLI permissions and worker flow.
+
+The workflow is user-gated: Codex implementation → evidence capture → explicit Claude review request → user finding decisions → explicit Codex remediation → explicit Claude verification → checkpoint. Review and remediation are each capped at two rounds. Workspace hashes mark reviews stale when Git changes during review.
 
 ## Session and SSE lifecycle
 
@@ -47,4 +49,3 @@ Capsule generation includes relevant accepted decisions and all locked decisions
 ## Known deployment boundary
 
 This MVP binds locally and assumes trusted OS access by one user. Production hardening would add authentication, CSRF protection, encrypted credential storage, isolated containers, per-project OS permissions, and a dedicated policy service.
-

@@ -1,6 +1,6 @@
 # Current State
 
-The MVP is code-complete and opened successfully at `http://localhost:3000`. PostgreSQL is healthy and the initial SQL migration created 12 tables. The existing Redis on port 6379 requires credentials not available to this task, and the Compose Redis container could not bind because that port was occupied. The local Codex executable exists but execution from the current sandbox returned Access denied, so a real provider job was not run.
+The provider/security remediation compiles and its automated verification passes. PostgreSQL/Redis runtime integration was not repeated. Real provider prompts remain blocked: the sandbox exposes an inaccessible Codex Windows app alias and no Claude CLI installation. Do not treat local-provider verification as complete until both opt-in smoke commands return their expected OK markers.
 
 ## Update — 2026-07-22T05:58:48Z
 - What changed: Recorded observed implementation and environment state.

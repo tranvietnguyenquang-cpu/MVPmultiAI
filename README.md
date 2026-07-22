@@ -11,6 +11,15 @@ Local-first, evidence-based context continuity for AI coding sessions.
 5. Start web and worker: `npm run dev`.
 6. Open `http://localhost:3000`.
 
-Codex execution requires the locally installed CLI. Verify with `codex --version` and authenticate using `codex login`. ProjectRelay does not collect provider passwords or credentials.
+Provider execution uses only locally installed CLI authentication. Verify Codex with `codex --version` and `codex login status`; verify Claude Code with `claude --version` and `claude auth status`. ProjectRelay never collects, copies, or stores provider passwords, tokens, cookies, credential paths, or environment values.
+
+Optional real checks are excluded from normal CI:
+
+```sh
+npm run smoke:codex
+npm run smoke:claude
+```
+
+Project registration selects server-owned command IDs; browser input cannot define executables or arguments. Claude review and verification sessions are read-only and require an explicit user action. Providers never call one another autonomously.
 
 See `docs/PRODUCT_SPEC.md`, `docs/ARCHITECTURE.md`, and `docs/IMPLEMENTATION_PLAN.md` for product and system details.
