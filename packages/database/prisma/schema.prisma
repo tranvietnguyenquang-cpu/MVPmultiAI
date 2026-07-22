@@ -160,8 +160,10 @@ model ConversationMessage {
   status ConversationMessageStatus @default(QUEUED)
   handoffCapsuleId String?
   taskId String?
+  agentSessionId String?
   createdAt DateTime @default(now())
   @@index([conversationId,createdAt])
+  @@index([agentSessionId])
 }
 model ProviderSession {
   id String @id @default(cuid())
@@ -326,9 +328,12 @@ model AgentSession {
   baselineDiffHash String?
   purpose     String @default("IMPLEMENTATION")
   readOnly    Boolean @default(false)
+  providerSessionId String?
+  conversationId String?
   createdAt   DateTime @default(now())
   events      AgentEvent[]
   evidence    Evidence[]
+  @@index([conversationId])
 }
 
 model ReviewFinding {

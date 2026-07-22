@@ -4,8 +4,9 @@ import { Prisma, prisma } from "@project-relay/database";
 import { inspectGit, runCommand } from "@project-relay/execution";
 import { appendMemoryUpdate } from "@project-relay/project-memory";
 import { providerRegistry, type ProviderRole } from "@project-relay/providers";
-import { commandSpecSchema, findLockedDecisionConflicts, sessionJobSchema, type CommandSpec, type SessionJob, type TaskCapsuleContent } from "@project-relay/shared";
+import { commandSpecSchema, findLockedDecisionConflicts, sessionJobSchema, type CommandSpec, type ConversationMessageJob, type SessionJob, type TaskCapsuleContent } from "@project-relay/shared";
 import { pollCancellation } from "./cancellation.js";
+import { processConversationMessage } from "./conversation-worker.js";
 import { parseReviewFindings } from "./review-findings.js";
 import { providerHealthMonitor, type ProviderHealthMode } from "./provider-health.js";
 
@@ -46,6 +47,9 @@ async function processSession(job:Job<SessionJob>){const parsed=sessionJobSchema
 
 await prisma.agentSession.updateMany({where:{state:{in:["STARTING","RUNNING"]}},data:{state:"FAILED",endedAt:new Date(),error:"Worker restarted before the session completed."}});
 const worker=new Worker<SessionJob>("agent-sessions",processSession,{connection,concurrency:1});
+const conversationWorker=new Worker<ConversationMessageJob>("conversation-messages",job=>processConversationMessage(job),{connection,concurrency:1});
 const providerHealthWorker=new Worker<{providerId:"codex-cli"|"claude-cli";mode:ProviderHealthMode}>("provider-health",async job=>providerHealthMonitor.probe(job.data.providerId,job.data.mode,true),{connection,concurrency:1});
 void providerHealthMonitor.startup();const refreshTimer=setInterval(()=>void providerHealthMonitor.refreshAll(),5*60_000);const authTimer=setInterval(()=>void providerHealthMonitor.authenticateAll(),15*60_000);refreshTimer.unref();authTimer.unref();
-worker.on("failed",async(job,error)=>{if(job){const state=await prisma.agentSession.findUnique({where:{id:job.data.sessionId},select:{state:true}});if(state&&!terminalStates.includes(state.state as typeof terminalStates[number]))await prisma.agentSession.update({where:{id:job.data.sessionId},data:{state:"FAILED",endedAt:new Date(),error:error.message}});}});console.log("ProjectRelay worker listening for agent-sessions and provider-health jobs.");async function shutdown(){clearInterval(refreshTimer);clearInterval(authTimer);await worker.close();await providerHealthWorker.close();await prisma.$disconnect();process.exit(0);}process.on("SIGINT",()=>void shutdown());process.on("SIGTERM",()=>void shutdown());
+worker.on("failed",async(job,error)=>{if(job){const state=await prisma.agentSession.findUnique({where:{id:job.data.sessionId},select:{state:true}});if(state&&!terminalStates.includes(state.state as typeof terminalStates[number]))await prisma.agentSession.update({where:{id:job.data.sessionId},data:{state:"FAILED",endedAt:new Date(),error:error.message}});}});
+conversationWorker.on("failed",async(job,error)=>{if(job){const state=await prisma.agentSession.findUnique({where:{id:job.data.sessionId},select:{state:true}});if(state&&!terminalStates.includes(state.state as typeof terminalStates[number]))await prisma.agentSession.update({where:{id:job.data.sessionId},data:{state:"FAILED",endedAt:new Date(),error:error.message}});}});
+console.log("ProjectRelay worker listening for agent-sessions, conversation-messages, and provider-health jobs.");async function shutdown(){clearInterval(refreshTimer);clearInterval(authTimer);await worker.close();await conversationWorker.close();await providerHealthWorker.close();await prisma.$disconnect();process.exit(0);}process.on("SIGINT",()=>void shutdown());process.on("SIGTERM",()=>void shutdown());

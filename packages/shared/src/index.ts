@@ -46,6 +46,9 @@ export const createTaskSchema = z.object({
   assignedProvider: z.enum(["codex-cli", "claude-cli"]).default("codex-cli")
 });
 
+type JsonPrimitive = string | number | boolean | null;
+export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
+
 export type TaskCapsuleContent = {
   task: { id: string; title: string; objective: string; userRequest: string };
   architectureDecisions: Array<{ id: string; title: string; decision: string; locked: boolean }>;
@@ -55,10 +58,24 @@ export type TaskCapsuleContent = {
   acceptanceCriteria: Array<{ id: string; description: string }>;
   latestTestEvidence: Array<{ kind: string; successful: boolean; summary: string }>;
   prohibitedChanges: string[];
+  conversationMode?: "ASK" | "IMPLEMENT" | "REVIEW" | "CONTINUE" | "VERIFY";
+  handoff?: { fromProviderId: string; toProviderId: string; objective: string; unresolvedIssues: JsonValue; acceptedFindings: JsonValue };
 };
 
 export const sessionJobSchema = z.object({ sessionId: z.string(), taskId: z.string(), capsuleId: z.string() });
 export type SessionJob = z.infer<typeof sessionJobSchema>;
+
+export const conversationMessageJobSchema = z.object({
+  sessionId: z.string(),
+  taskId: z.string(),
+  conversationId: z.string(),
+  messageId: z.string(),
+  providerId: z.string(),
+  routingDecisionId: z.string(),
+  providerSessionId: z.string(),
+  handoffCapsuleId: z.string().optional()
+});
+export type ConversationMessageJob = z.infer<typeof conversationMessageJobSchema>;
 
 export function approximateTokens(value: unknown): number {
   return Math.ceil(JSON.stringify(value).length / 4);

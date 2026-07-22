@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import type { ConversationMessageJob } from "@project-relay/shared";
 import { Prisma, prisma } from "./index.js";
 const HANDOFF_MAX_BYTES=32_768;
 function canonical(value:unknown):string{if(Array.isArray(value))return`[${value.map(canonical).join(",")}]`;if(value&&typeof value==="object")return`{${Object.entries(value as Record<string,unknown>).sort(([a],[b])=>a.localeCompare(b)).map(([key,item])=>`${JSON.stringify(key)}:${canonical(item)}`).join(",")}}`;return JSON.stringify(value);}
@@ -24,7 +25,6 @@ export const getPreviousAssistantMessage=(conversationId:string)=>prisma.convers
 export async function findProjectTask(taskId:string,projectId:string){const task=await prisma.task.findUnique({where:{id:taskId},select:{id:true,projectId:true}});return task&&task.projectId===projectId?task:null;}
 
 type ConversationMode="ASK"|"IMPLEMENT"|"REVIEW"|"CONTINUE"|"VERIFY";
-type ConversationMessageQueuePayload={sessionId:string;taskId:string;conversationId:string;messageId:string;providerId:string};
 function agentSessionPurpose(mode:ConversationMode):"IMPLEMENTATION"|"REVIEW"|"VERIFICATION"{if(mode==="REVIEW")return"REVIEW";if(mode==="VERIFY")return"VERIFICATION";return"IMPLEMENTATION";}
 
 export type QueueConversationMessageInput={
@@ -38,7 +38,7 @@ export type QueueConversationMessageInput={
   reason:string;
   providerHealthSnapshot:Record<string,unknown>;
   previousAssistantMessage:{id:string;providerId:string|null}|null;
-  queueAdd:(payload:ConversationMessageQueuePayload)=>Promise<unknown>;
+  queueAdd:(payload:ConversationMessageJob)=>Promise<unknown>;
 };
 
 export async function queueConversationMessage(input:QueueConversationMessageInput){
@@ -72,10 +72,30 @@ export async function queueConversationMessage(input:QueueConversationMessageInp
     const taskId=input.taskId??(await tx.task.create({data:{projectId:input.projectId,title:input.content.slice(0,160)||"Conversation message",userRequest:input.content,objective:input.content.slice(0,2_000),relevantFiles:[],constraints:[],prohibitedChanges:[],assignedProvider:input.selectedProviderId}})).id;
 
     const purpose=agentSessionPurpose(input.mode);
-    const agentSession=await tx.agentSession.create({data:{projectId:input.projectId,taskId,providerId:input.selectedProviderId,state:"QUEUED",purpose,readOnly:purpose!=="IMPLEMENTATION"}});
+    const agentSession=await tx.agentSession.create({data:{projectId:input.projectId,taskId,providerId:input.selectedProviderId,state:"QUEUED",purpose,readOnly:purpose!=="IMPLEMENTATION",providerSessionId:providerSession.id,conversationId:input.conversationId}});
 
-    await input.queueAdd({sessionId:agentSession.id,taskId,conversationId:input.conversationId,messageId:userMessage.id,providerId:input.selectedProviderId});
+    await input.queueAdd({
+      sessionId:agentSession.id,
+      taskId,
+      conversationId:input.conversationId,
+      messageId:userMessage.id,
+      providerId:input.selectedProviderId,
+      routingDecisionId:routingDecision.id,
+      providerSessionId:providerSession.id,
+      ...(handoffCapsule?{handoffCapsuleId:handoffCapsule.id}:{})
+    });
 
     return{userMessage,routingDecision,providerSession,handoffCapsule,agentSession,taskId};
   });
+}
+
+export async function getConversationExecution(executionId:string){
+  const agentSession=await prisma.agentSession.findUnique({where:{id:executionId}});
+  if(!agentSession)return null;
+  const[events,assistantMessage,providerSession]=await Promise.all([
+    prisma.agentEvent.findMany({where:{sessionId:executionId},orderBy:{id:"asc"}}),
+    prisma.conversationMessage.findFirst({where:{agentSessionId:executionId}}),
+    agentSession.providerSessionId?prisma.providerSession.findUnique({where:{id:agentSession.providerSessionId}}):Promise.resolve(null)
+  ]);
+  return{agentSession,events,assistantMessage,providerSession};
 }

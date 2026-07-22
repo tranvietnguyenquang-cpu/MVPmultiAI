@@ -1,5 +1,5 @@
 import { Queue } from "bullmq";
-import type { SessionJob } from "@project-relay/shared";
+import type { ConversationMessageJob, SessionJob } from "@project-relay/shared";
 
 const redisUrl = new URL(process.env.REDIS_URL ?? "redis://localhost:6379");
 const connection = {
@@ -15,7 +15,6 @@ export function getSessionQueue(): Queue<SessionJob, void, "run"> {
 }
 export function getProviderHealthQueue(){if(!providerHealthQueue)providerHealthQueue=new Queue("provider-health",{connection});return providerHealthQueue;}
 
-export type ConversationMessageJob = { sessionId: string; taskId: string; conversationId: string; messageId: string; providerId: string };
 let conversationMessageQueue: Queue<ConversationMessageJob, void, "route"> | undefined;
 export function getConversationMessageQueue(): Queue<ConversationMessageJob, void, "route"> {
   if (!conversationMessageQueue) conversationMessageQueue = new Queue<ConversationMessageJob, void, "route">("conversation-messages", { connection });
