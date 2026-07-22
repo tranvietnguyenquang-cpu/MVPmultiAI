@@ -1,0 +1,44 @@
+{
+  "name": "project-relay",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm-run-all --parallel dev:web dev:worker",
+    "dev:web": "npm run dev -w @project-relay/web",
+    "dev:worker": "npm run dev -w @project-relay/worker",
+    "build": "npm run db:generate && tsc -b && npm run build -w @project-relay/web",
+    "typecheck": "npm run db:generate && tsc -b && tsc -p apps/web/tsconfig.json --noEmit",
+    "lint": "eslint . --max-warnings=0",
+    "test": "vitest run",
+    "db:generate": "prisma generate --schema packages/database/prisma/schema.prisma",
+    "db:migrate": "prisma migrate deploy --schema packages/database/prisma/schema.prisma",
+    "worker": "npm run start -w @project-relay/worker"
+  },
+  "dependencies": {
+    "@prisma/client": "^6.19.3",
+    "bullmq": "^5.80.10",
+    "ioredis": "5.7.0",
+    "zod": "3.25.76"
+  },
+  "overrides": {
+    "postcss": "8.5.10",
+    "sharp": "0.35.0",
+    "uuid": "11.1.1"
+  },
+  "devDependencies": {
+    "@eslint/js": "9.34.0",
+    "@types/node": "22.17.2",
+    "eslint": "9.34.0",
+    "eslint-config-next": "16.2.11",
+    "npm-run-all": "4.1.5",
+    "prisma": "^6.19.3",
+    "tsx": "4.20.5",
+    "typescript": "5.9.2",
+    "typescript-eslint": "8.41.0",
+    "vitest": "3.2.4"
+  }
+}

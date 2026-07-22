@@ -1,0 +1,1 @@
+{"extends":"../../tsconfig.base.json","compilerOptions":{"outDir":"dist","rootDir":"src"},"references":[{"path":"../shared"},{"path":"../project-memory"},{"path":"../execution"}],"include":["src/**/*.ts"]}

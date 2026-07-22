@@ -1,0 +1,12 @@
+{
+  "files": [],
+  "references": [
+    { "path": "packages/shared" },
+    { "path": "packages/database" },
+    { "path": "packages/execution" },
+    { "path": "packages/project-memory" },
+    { "path": "packages/providers" },
+    { "path": "packages/context-engine" },
+    { "path": "apps/worker" }
+  ]
+}

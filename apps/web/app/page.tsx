@@ -1,0 +1,10 @@
+import Link from "next/link";
+import { prisma } from "@project-relay/database";
+import { ProjectForm } from "../components/project-form";
+
+export const dynamic="force-dynamic";
+export default async function ProjectsPage(){
+  let projects:Awaited<ReturnType<typeof prisma.project.findMany>>=[]; let offline=false;
+  try{projects=await prisma.project.findMany({where:{archivedAt:null},orderBy:{updatedAt:"desc"}});}catch{offline=true;}
+  return <><div className="eyebrow">Local orchestration</div><h1>Carry the work.<br/>Leave the chat behind.</h1><p className="subtle">ProjectRelay turns repository state, decisions, tasks, and real command evidence into clean handoffs between AI coding sessions.</p><div className="grid"><section className="card span8"><div className="row"><h2>Active projects</h2><span className={`pill ${offline?"warn":"good"}`}>{offline?"DATABASE OFFLINE":"SOURCE OF TRUTH READY"}</span></div>{projects.length?<div className="stack">{projects.map(project=><Link className="card" href={`/projects/${project.id}`} key={project.id}><div className="row"><div><h3>{project.name}</h3><div className="mono subtle">{project.repositoryPath}</div></div><span>→</span></div></Link>)}</div>:<div className="empty">No repositories registered yet.</div>}</section><section className="card span4"><h2>Register repository</h2><p className="subtle">Existing files are inspected. Memory files are only created when missing.</p><div className="divider"/><ProjectForm/></section><section className="card span4"><div className="label">Authority order</div><div className="metric good">Git → Evidence</div><p className="subtle">Agent summaries rank below observable project state.</p></section><section className="card span4"><div className="label">Verification gate</div><div className="metric">Every criterion</div><p className="subtle">A claim without attached evidence cannot pass.</p></section><section className="card span4"><div className="label">Context transfer</div><div className="metric">Capsules only</div><p className="subtle">Fresh sessions receive relevant state, never full chat history.</p></section></div></>;
+}

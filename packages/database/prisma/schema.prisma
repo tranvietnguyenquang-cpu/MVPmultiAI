@@ -1,0 +1,244 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum TaskStatus {
+  PLANNED
+  IN_PROGRESS
+  BLOCKED
+  CODE_COMPLETE
+  TEST_FAILED
+  READY_FOR_REVIEW
+  VERIFIED
+  CANCELLED
+}
+enum Priority {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+enum DecisionStatus {
+  PROPOSED
+  ACCEPTED
+  SUPERSEDED
+  REJECTED
+}
+enum SessionState {
+  QUEUED
+  STARTING
+  RUNNING
+  WAITING_FOR_APPROVAL
+  SUCCEEDED
+  FAILED
+  CANCELLED
+  TIMED_OUT
+}
+enum EvidenceKind {
+  CHANGED_FILES
+  GIT_DIFF
+  GIT_STATUS
+  TYPECHECK
+  LINT
+  UNIT_TEST
+  INTEGRATION_TEST
+  BUILD
+  MIGRATION
+  SCREENSHOT
+  ARTIFACT
+  COMMAND
+}
+enum Confidence {
+  LOW
+  MEDIUM
+  HIGH
+}
+enum ApprovalStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+model Project {
+  id                String @id @default(cuid())
+  name              String
+  repositoryPath    String @unique
+  defaultProvider   String @default("codex")
+  allowedCommands   Json
+  permittedPaths    Json
+  archivedAt        DateTime?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  tasks             Task[]
+  decisions         Decision[]
+  memoryUpdates     MemoryUpdate[]
+  checkpoints       Checkpoint[]
+  sessions          AgentSession[]
+  auditEvents       AuditEvent[]
+  approvals         Approval[]
+}
+
+model Task {
+  id                 String @id @default(cuid())
+  projectId          String
+  project            Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  title              String
+  userRequest        String
+  objective          String
+  status             TaskStatus @default(PLANNED)
+  priority           Priority @default(MEDIUM)
+  relevantFiles      Json
+  constraints        Json
+  prohibitedChanges  Json
+  assignedProvider   String @default("codex")
+  activeSessionId    String?
+  parentTaskId       String?
+  parentTask         Task? @relation("TaskHierarchy", fields: [parentTaskId], references: [id])
+  childTasks         Task[] @relation("TaskHierarchy")
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+  criteria           AcceptanceCriterion[]
+  capsules           TaskCapsule[]
+  sessions           AgentSession[]
+  evidence           Evidence[]
+  memoryUpdates      MemoryUpdate[]
+}
+
+model AcceptanceCriterion {
+  id          String @id @default(cuid())
+  taskId      String
+  task        Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  description String
+  passed      Boolean @default(false)
+  evidence    Evidence[]
+  createdAt   DateTime @default(now())
+}
+
+model Decision {
+  id           String @id
+  projectId    String
+  project      Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  title        String
+  context      String
+  decision     String
+  consequences String
+  status       DecisionStatus @default(PROPOSED)
+  locked       Boolean @default(false)
+  createdBy    String
+  createdAt    DateTime @default(now())
+  supersededBy String?
+  @@unique([projectId, id])
+}
+
+model TaskCapsule {
+  id                    String @id @default(cuid())
+  taskId                String
+  task                  Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  content               Json
+  approximateTokenCount Int
+  createdAt              DateTime @default(now())
+}
+
+model AgentSession {
+  id          String @id @default(cuid())
+  projectId   String
+  project     Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  taskId      String
+  task        Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  providerId  String
+  state       SessionState @default(QUEUED)
+  externalId  String?
+  startedAt   DateTime?
+  endedAt     DateTime?
+  exitCode    Int?
+  error       String?
+  usage       Json?
+  createdAt   DateTime @default(now())
+  events      AgentEvent[]
+  evidence    Evidence[]
+}
+
+model AgentEvent {
+  id        BigInt @id @default(autoincrement())
+  sessionId String
+  session   AgentSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  type      String
+  stream    String?
+  message   String
+  createdAt DateTime @default(now())
+  @@index([sessionId, id])
+}
+
+model Evidence {
+  id          String @id @default(cuid())
+  taskId      String
+  task        Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  sessionId   String?
+  session     AgentSession? @relation(fields: [sessionId], references: [id], onDelete: SetNull)
+  criterionId String?
+  criterion   AcceptanceCriterion? @relation(fields: [criterionId], references: [id], onDelete: SetNull)
+  kind        EvidenceKind
+  commandId   String?
+  startedAt   DateTime?
+  endedAt     DateTime?
+  exitCode    Int?
+  output      String?
+  artifactPath String?
+  metadata    Json?
+  successful  Boolean
+  createdAt   DateTime @default(now())
+}
+
+model Checkpoint {
+  id          String @id @default(cuid())
+  projectId   String
+  project     Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  reason      String
+  content     Json
+  filePath    String
+  gitCommit   String?
+  gitBranch   String?
+  dirty       Boolean
+  createdAt   DateTime @default(now())
+}
+
+model MemoryUpdate {
+  id          String @id @default(cuid())
+  projectId   String
+  project     Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  taskId      String?
+  task        Task? @relation(fields: [taskId], references: [id], onDelete: SetNull)
+  file        String
+  changed     String
+  reason      String
+  agent       String
+  evidenceRef String?
+  confidence  Confidence
+  createdAt   DateTime @default(now())
+}
+
+model Approval {
+  id          String @id @default(cuid())
+  projectId   String
+  project     Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  action      String
+  rationale   String
+  status      ApprovalStatus @default(PENDING)
+  decidedAt   DateTime?
+  createdAt   DateTime @default(now())
+}
+
+model AuditEvent {
+  id        String @id @default(cuid())
+  projectId String
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  actor     String
+  action    String
+  details   Json
+  createdAt DateTime @default(now())
+}

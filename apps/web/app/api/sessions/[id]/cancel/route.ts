@@ -1,0 +1,2 @@
+import { NextResponse } from "next/server"; import { prisma } from "@project-relay/database"; import { getSessionQueue } from "../../../../../lib/redis";
+export async function POST(_:Request,{params}:{params:Promise<{id:string}>}){const {id}=await params;const job=await getSessionQueue().getJob(id);await job?.remove();await prisma.agentSession.update({where:{id},data:{state:"CANCELLED",endedAt:new Date()}});return NextResponse.json({cancelled:true});}
