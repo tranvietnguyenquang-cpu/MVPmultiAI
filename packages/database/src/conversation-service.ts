@@ -89,6 +89,10 @@ export async function queueConversationMessage(input:QueueConversationMessageInp
   });
 }
 
+export async function getProviderHealthDisplay(providerIds:string[]){const rows=await prisma.providerHealth.findMany({where:{providerId:{in:providerIds}}});const byId=new Map(rows.map(row=>[row.providerId,row]));const display:Record<string,{installed:boolean;authentication:string;available:boolean;version:string|null}>={};for(const providerId of providerIds){const row=byId.get(providerId);display[providerId]=row?{installed:row.installed,authentication:row.authentication,available:row.available,version:row.version}:{installed:false,authentication:"UNKNOWN",available:false,version:null};}return display;}
+
+export const getActiveConversationExecution=(conversationId:string)=>prisma.agentSession.findFirst({where:{conversationId,state:{in:["QUEUED","STARTING","RUNNING","WAITING_FOR_APPROVAL"]}},orderBy:{createdAt:"desc"},select:{id:true,state:true,providerId:true}});
+
 export async function getConversationExecution(executionId:string){
   const agentSession=await prisma.agentSession.findUnique({where:{id:executionId}});
   if(!agentSession)return null;

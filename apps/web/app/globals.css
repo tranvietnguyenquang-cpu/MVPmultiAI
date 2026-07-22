@@ -18,3 +18,16 @@ h1 { font-size:clamp(30px,4vw,54px); letter-spacing:-.055em; margin:8px 0 10px; 
 input,textarea,select{width:100%;background:#080d12;border:1px solid var(--line);border-radius:8px;padding:10px 12px;color:var(--ink);font:inherit}textarea{min-height:90px;resize:vertical}label{font-size:12px;color:var(--muted);display:grid;gap:6px}.form{display:grid;gap:14px}.two{display:grid;grid-template-columns:1fr 1fr;gap:12px}.button,button{display:inline-flex;justify-content:center;border:0;border-radius:8px;background:var(--accent);color:#062319;font-weight:750;padding:10px 14px;cursor:pointer;width:auto}.button.secondary{background:#1c252e;color:var(--ink);border:1px solid var(--line)}
 .empty{padding:42px;text-align:center;color:var(--muted);border:1px dashed var(--line);border-radius:12px}.mono{font-family:ui-monospace,monospace;font-size:12px}.log{background:#05080b;padding:14px;border-radius:8px;max-height:360px;overflow:auto;white-space:pre-wrap;color:#b8c9d4}.criteria{list-style:none;padding:0;margin:0;display:grid;gap:9px}.criteria li{display:flex;gap:10px;align-items:start}.dot{width:9px;height:9px;margin-top:5px;border-radius:50%;background:#394651}.dot.pass{background:var(--accent);box-shadow:0 0 12px #8ef0c777}
 @media(max-width:850px){.shell{grid-template-columns:1fr}.sidebar{position:static;height:auto;border-right:0;border-bottom:1px solid var(--line)}.nav{grid-template-columns:repeat(3,1fr)}.main{padding:24px}.span8,.span7,.span6,.span5,.span4{grid-column:1/-1}.two{grid-template-columns:1fr}}
+
+.timeline{display:grid;gap:12px;max-height:560px;overflow-y:auto;padding-right:4px}
+.msg{border-left:3px solid var(--line);padding:10px 0 10px 14px}
+.msg.user{border-left-color:var(--muted)}
+.msg.assistant-codex-cli{border-left-color:#6cb6ff}
+.msg.assistant-claude-cli{border-left-color:#d29bff}
+.msg.pending{border-left-color:var(--amber)}
+.badge{font:600 10px ui-monospace,monospace;padding:3px 7px;border-radius:6px;text-transform:uppercase;letter-spacing:.05em}
+.badge.codex-cli{background:#123249;color:#8ec9ff}
+.badge.claude-cli{background:#2c1f45;color:#d9b8ff}
+.handoff-note{font-size:12px;color:var(--amber);margin:6px 0}
+.debug{margin-top:6px}
+.debug summary{cursor:pointer;font-size:11px;color:var(--muted)}

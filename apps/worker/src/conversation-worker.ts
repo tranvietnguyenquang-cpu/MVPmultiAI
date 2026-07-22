@@ -120,7 +120,6 @@ export async function processConversationMessage(job: Job<ConversationMessageJob
     const providerAgentSession = await provider.createSession({
       workspace: session.project.repositoryPath,
       taskId: session.taskId,
-      ...(providerSession.externalSessionId ? { resumeExternalId: providerSession.externalSessionId } : {}),
       ...(role ? { role } : {})
     });
     await event(session.id, "state", `Running ${status.version ?? provider.name}.`);
@@ -137,8 +136,7 @@ export async function processConversationMessage(job: Job<ConversationMessageJob
     let timedOut = false;
     const timer = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
     try {
-      if (providerSession.externalSessionId) await provider.resumeSession(providerAgentSession, capsule, controller.signal);
-      else await provider.startSession(providerAgentSession, capsule, controller.signal);
+      await provider.startSession(providerAgentSession, capsule, controller.signal);
       await consume;
     } catch (runError) {
       if (timedOut) throw new Error(`${provider.name} execution timed out after ${timeoutMs}ms.`);
