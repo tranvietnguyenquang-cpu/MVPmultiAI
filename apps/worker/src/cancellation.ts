@@ -1,0 +1,1 @@
+export async function pollCancellation(input:{isCancelled:()=>Promise<boolean>;abort:()=>void;intervalMs?:number;signal?:AbortSignal}):Promise<void>{const interval=input.intervalMs??500;while(!input.signal?.aborted){if(await input.isCancelled()){input.abort();return;}await new Promise(resolve=>setTimeout(resolve,interval));}}
