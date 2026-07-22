@@ -78,11 +78,39 @@ enum QuotaSource {
   USER_INPUT
   OFFICIAL_API
 }
-enum ConversationStatus { ACTIVE PAUSED COMPLETED CANCELLED }
-enum ConversationRole { USER ASSISTANT SYSTEM TOOL }
-enum ConversationMode { ASK IMPLEMENT REVIEW CONTINUE VERIFY }
-enum ConversationMessageStatus { QUEUED RUNNING COMPLETED CANCELLED FAILED }
-enum ProviderSessionStatus { QUEUED RUNNING COMPLETED CANCELLED FAILED }
+enum ConversationStatus {
+  ACTIVE
+  PAUSED
+  COMPLETED
+  CANCELLED
+}
+enum ConversationRole {
+  USER
+  ASSISTANT
+  SYSTEM
+  TOOL
+}
+enum ConversationMode {
+  ASK
+  IMPLEMENT
+  REVIEW
+  CONTINUE
+  VERIFY
+}
+enum ConversationMessageStatus {
+  QUEUED
+  RUNNING
+  COMPLETED
+  CANCELLED
+  FAILED
+}
+enum ProviderSessionStatus {
+  QUEUED
+  RUNNING
+  COMPLETED
+  CANCELLED
+  FAILED
+}
 
 model Project {
   id                String @id @default(cuid())
