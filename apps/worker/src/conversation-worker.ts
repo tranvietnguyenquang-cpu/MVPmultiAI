@@ -66,6 +66,60 @@ export type ConversationWorkerDeps = {
   timeoutMs?: number;
 };
 
+type LoadedAgentSession = Awaited<ReturnType<typeof loadAgentSession>>;
+type LoadedConversation = NonNullable<Awaited<ReturnType<typeof prisma.conversation.findUnique>>>;
+type LoadedUserMessage = NonNullable<Awaited<ReturnType<typeof prisma.conversationMessage.findUnique>>>;
+type LoadedRoutingDecision = NonNullable<Awaited<ReturnType<typeof prisma.routingDecision.findUnique>>>;
+type LoadedProviderSession = NonNullable<Awaited<ReturnType<typeof prisma.providerSession.findUnique>>>;
+type LoadedHandoffCapsule = NonNullable<Awaited<ReturnType<typeof prisma.handoffCapsule.findUnique>>>;
+
+function loadAgentSession(id: string) {
+  return prisma.agentSession.findUnique({
+    where: { id },
+    include: { project: { include: { decisions: { where: { status: "ACCEPTED", locked: true } } } }, task: true }
+  });
+}
+
+/**
+ * The AgentSession is the authority root for a queued conversation execution: every other
+ * ID in the job payload is only ever used to *load* a row, never trusted directly. This
+ * cross-checks that everything loaded actually belongs together before any provider is
+ * touched, so a stale or cross-wired payload (e.g. pointing at another project's task, or
+ * a provider session for a different conversation) is rejected instead of silently acted on.
+ */
+function validateExecutionRelationships(input: {
+  data: ConversationMessageJob;
+  session: NonNullable<LoadedAgentSession>;
+  conversation: LoadedConversation;
+  userMessage: LoadedUserMessage;
+  routingDecision: LoadedRoutingDecision;
+  providerSession: LoadedProviderSession;
+  handoffCapsule: LoadedHandoffCapsule | null;
+}): string | null {
+  const { data, session, conversation, userMessage, routingDecision, providerSession, handoffCapsule } = input;
+
+  if (session.conversationId !== data.conversationId) return "Cross-wired execution: the agent session's conversation does not match the queued job.";
+  if (conversation.id !== data.conversationId) return "Cross-wired execution: the loaded conversation does not match the queued conversationId.";
+  if (conversation.projectId !== session.projectId) return "Cross-wired execution: the conversation's project does not match the agent session's project.";
+  if (session.taskId !== data.taskId) return "Cross-wired execution: the queued taskId does not match the agent session's own task.";
+  if (session.task.projectId !== session.projectId) return "Cross-wired execution: the task's project does not match the agent session's project.";
+  if (userMessage.conversationId !== conversation.id) return "Cross-wired execution: the user message does not belong to this conversation.";
+  if (userMessage.id !== data.messageId) return "Cross-wired execution: the queued messageId does not match the loaded user message.";
+  if (session.userMessageId && session.userMessageId !== userMessage.id) return "Cross-wired execution: the agent session's own trigger message does not match the queued messageId.";
+  if (data.providerId !== session.providerId) return "Cross-wired execution: the queued providerId does not match the agent session's own provider.";
+  if (routingDecision.conversationId !== conversation.id) return "Cross-wired execution: the routing decision does not belong to this conversation.";
+  if (routingDecision.userMessageId !== userMessage.id) return "Cross-wired execution: the routing decision is not linked to this user message.";
+  if (routingDecision.selectedProviderId !== session.providerId) return "Cross-wired execution: the routing decision's selected provider does not match the agent session's provider.";
+  if (providerSession.conversationId !== conversation.id) return "Cross-wired execution: the provider session does not belong to this conversation.";
+  if (providerSession.providerId !== session.providerId) return "Cross-wired execution: the provider session's provider does not match the agent session's provider.";
+  if (session.providerSessionId && session.providerSessionId !== providerSession.id) return "Cross-wired execution: the agent session's own provider session does not match the queued providerSessionId.";
+  if (handoffCapsule) {
+    if (handoffCapsule.conversationId !== conversation.id) return "Cross-wired execution: the handoff capsule does not belong to this conversation.";
+    if (handoffCapsule.toProviderId !== session.providerId) return "Cross-wired execution: the handoff capsule's target provider does not match the agent session's provider.";
+  }
+  return null;
+}
+
 export async function processConversationMessage(job: Job<ConversationMessageJob>, deps: ConversationWorkerDeps = {}): Promise<void> {
   const registry = deps.registry ?? defaultRegistry;
   const timeoutMs = deps.timeoutMs ?? DEFAULT_TIMEOUT_MS;
@@ -74,10 +128,7 @@ export async function processConversationMessage(job: Job<ConversationMessageJob
   const claimed = await prisma.agentSession.updateMany({ where: { id: data.sessionId, state: "QUEUED" }, data: { state: "STARTING", startedAt: new Date() } });
   if (!claimed.count) return;
 
-  const session = await prisma.agentSession.findUnique({
-    where: { id: data.sessionId },
-    include: { project: { include: { decisions: { where: { status: "ACCEPTED", locked: true } } } }, task: true }
-  });
+  const session = await loadAgentSession(data.sessionId);
   if (!session) throw new Error("Queued conversation execution references a missing agent session.");
 
   const [conversation, userMessage, providerSession] = await Promise.all([
@@ -85,9 +136,18 @@ export async function processConversationMessage(job: Job<ConversationMessageJob
     prisma.conversationMessage.findUniqueOrThrow({ where: { id: data.messageId } }),
     prisma.providerSession.findUniqueOrThrow({ where: { id: data.providerSessionId } })
   ]);
+  const routingDecision = await prisma.routingDecision.findUniqueOrThrow({ where: { id: data.routingDecisionId } });
   const handoffCapsule = data.handoffCapsuleId ? await prisma.handoffCapsule.findUnique({ where: { id: data.handoffCapsuleId } }) : null;
 
   await event(session.id, "state", "Queued conversation execution claimed.");
+
+  const validationError = validateExecutionRelationships({ data, session, conversation, userMessage, routingDecision, providerSession, handoffCapsule });
+  if (validationError) {
+    await prisma.agentSession.updateMany({ where: { id: session.id, state: "STARTING" }, data: { state: "FAILED", endedAt: new Date(), error: validationError } });
+    await event(session.id, "state", validationError);
+    throw new Error(validationError);
+  }
+
   const provider = registry.get(session.providerId);
 
   try {
