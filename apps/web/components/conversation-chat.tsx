@@ -40,6 +40,8 @@ type ExecutionStateResponse = {
   events: ExecutionEventView[];
   assistantMessage: ConversationMessageView | null;
   error: string | null;
+  failureCode: string | null;
+  startedAt: string;
 };
 
 const TERMINAL_STATES = new Set(["SUCCEEDED", "FAILED", "CANCELLED", "TIMED_OUT"]);
@@ -64,7 +66,7 @@ function formatTimestamp(value: string): string {
   return new Date(value).toLocaleString();
 }
 
-type PendingExecution = { id: string; status: string; events: ExecutionEventView[]; error: string | null };
+type PendingExecution = { id: string; status: string; events: ExecutionEventView[]; error: string | null; provider?: string; startedAt?: string; failureCode?: string | null };
 
 export function ConversationChat(props: {
   projectId: string;
@@ -88,6 +90,8 @@ export function ConversationChat(props: {
     props.initialActiveExecutionId ? { id: props.initialActiveExecutionId, status: "QUEUED", events: [], error: null } : null
   );
   const timelineRef = useRef<HTMLDivElement>(null);
+  const [now,setNow]=useState(Date.now());
+  useEffect(()=>{if(!pending)return;const timer=setInterval(()=>setNow(Date.now()),1000);return()=>clearInterval(timer);},[pending?.id]);
 
   useEffect(() => {
     if (!pending) return;
@@ -99,7 +103,7 @@ export function ConversationChat(props: {
         if (!response.ok) return;
         const data = await response.json() as ExecutionStateResponse;
         if (cancelled) return;
-        setPending(prev => (prev ? { ...prev, status: data.status, events: data.events, error: data.error } : prev));
+        setPending(prev => (prev ? { ...prev, status: data.status, events: data.events, error: data.error, provider:data.selectedProvider, startedAt:data.startedAt, failureCode:data.failureCode } : prev));
         if (TERMINAL_STATES.has(data.status)) {
           setPending(null);
           router.refresh();
@@ -151,6 +155,8 @@ export function ConversationChat(props: {
   }
 
   const busy = submitting || pending !== null;
+  async function cancelExecution(){if(!pending)return;await csrfFetch(`/api/conversations/${conversationId}/executions/${pending.id}/cancel?projectId=${projectId}`,{method:"POST"});setPending(null);router.refresh();}
+  async function retryExecution(executionId:string,providerId:string){setComposerError("");const response=await csrfFetch(`/api/conversations/${conversationId}/executions/${executionId}/retry`,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({projectId,provider:"same",idempotencyKey:crypto.randomUUID()})});const data=await response.json()as{executionId?:string;error?:string};if(!response.ok){setComposerError(data.error??"Retry failed.");return;}setPending({id:data.executionId!,status:"QUEUED",events:[],error:null,provider:providerId});router.refresh();}
 
   return (
     <div className="grid">
@@ -185,7 +191,7 @@ export function ConversationChat(props: {
         <div className="timeline" ref={timelineRef}>
           {messages.length === 0 && !pending && <div className="empty">No messages yet. Send the first prompt below.</div>}
           {messages.map(message => (
-            <MessageBubble key={message.id} message={message} handoffCapsules={handoffCapsules} />
+            <MessageBubble key={message.id} message={message} handoffCapsules={handoffCapsules} canRetry={!pending} onRetry={retryExecution} />
           ))}
           {pending && (
             <div className="msg pending card">
@@ -201,7 +207,9 @@ export function ConversationChat(props: {
                       .join("")
                   : "Waiting for the worker to pick up this execution…"}
               </div>
-              {pending.error && <p className="warn">{pending.error}</p>}
+              <p className="subtle">Provider: {providerLabel(pending.provider??provider)} · Elapsed: {pending.startedAt?Math.floor((now-new Date(pending.startedAt).getTime())/1000):0}s · Last activity: {pending.events.at(-1)?.createdAt?Math.floor((now-new Date(pending.events.at(-1)!.createdAt).getTime())/1000):0}s ago · inactivity 5m · maximum duration varies by mode</p>
+              <button className="button secondary" onClick={cancelExecution}>Cancel</button>
+              {pending.error&&<p className="warn">{pending.error}</p>}
             </div>
           )}
         </div>
@@ -248,7 +256,7 @@ export function ConversationChat(props: {
   );
 }
 
-function MessageBubble({ message, handoffCapsules }: { message: ConversationMessageView; handoffCapsules: HandoffCapsuleView[] }) {
+function MessageBubble({ message, handoffCapsules,canRetry,onRetry }: { message: ConversationMessageView; handoffCapsules: HandoffCapsuleView[];canRetry:boolean;onRetry:(id:string,provider:string)=>void }) {
   const isUser = message.role === "USER";
   const roleClass = isUser ? "user" : `assistant-${message.providerId ?? "unknown"}`;
   const handoff = message.handoffCapsuleId ? handoffCapsules.find(item => item.id === message.handoffCapsuleId) : undefined;
@@ -284,6 +292,7 @@ function MessageBubble({ message, handoffCapsules }: { message: ConversationMess
       )}
 
       <p style={{ whiteSpace: "pre-wrap" }}>{message.content}</p>
+      {message.status==="FAILED"&&message.agentSessionId&&message.providerId&&<button disabled={!canRetry} onClick={()=>onRetry(message.agentSessionId!,message.providerId!)}>Retry with same provider</button>}
 
       <details className="debug">
         <summary>Debug details</summary>

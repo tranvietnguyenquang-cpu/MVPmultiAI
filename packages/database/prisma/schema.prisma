@@ -205,9 +205,9 @@ model ConversationMessage {
   task Task? @relation(fields:[taskId],references:[id],onDelete:Restrict)
   agentSessionId String? @unique
   agentSession AgentSession? @relation("AssistantMessage",fields:[agentSessionId],references:[id],onDelete:SetNull)
-  triggeredSession AgentSession? @relation("TriggerMessage")
+  triggeredSessions AgentSession[] @relation("TriggerMessage")
   lastMessageOfSession ProviderSession? @relation("ProviderSessionLastMessage")
-  routingDecision RoutingDecision?
+  routingDecisions RoutingDecision[]
   createdAt DateTime @default(now())
   @@index([conversationId,createdAt])
   @@unique([conversationId,idempotencyKey])
@@ -252,7 +252,7 @@ model RoutingDecision {
   id String @id @default(cuid())
   conversationId String
   conversation Conversation @relation(fields:[conversationId],references:[id],onDelete:Cascade)
-  userMessageId String? @unique
+  userMessageId String?
   userMessage ConversationMessage? @relation(fields:[userMessageId],references:[id],onDelete:Cascade)
   requestedProviderId String?
   selectedProviderId String
@@ -260,6 +260,7 @@ model RoutingDecision {
   providerHealthSnapshot Json
   createdAt DateTime @default(now())
   @@index([conversationId,createdAt])
+  @@index([userMessageId])
 }
 
 model ProviderHealth {
@@ -377,6 +378,7 @@ model AgentSession {
   endedAt     DateTime?
   exitCode    Int?
   error       String?
+  failureCode String?
   usage       Json?
   baselineCommit String?
   baselineDiffHash String?
@@ -386,7 +388,7 @@ model AgentSession {
   providerSession ProviderSession? @relation(fields:[providerSessionId],references:[id],onDelete:SetNull)
   conversationId String?
   conversation Conversation? @relation(fields:[conversationId],references:[id],onDelete:SetNull)
-  userMessageId String? @unique
+  userMessageId String?
   userMessage ConversationMessage? @relation("TriggerMessage",fields:[userMessageId],references:[id],onDelete:SetNull)
   assistantMessage ConversationMessage? @relation("AssistantMessage")
   /** Owning worker's process id while STARTING/RUNNING; cleared once terminal. */
@@ -397,6 +399,7 @@ model AgentSession {
   events      AgentEvent[]
   evidence    Evidence[]
   @@index([conversationId])
+  @@index([userMessageId])
   @@index([state, leaseExpiresAt])
 }
 

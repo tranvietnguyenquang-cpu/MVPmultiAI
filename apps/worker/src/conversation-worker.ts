@@ -8,7 +8,13 @@ import { conversationMessageJobSchema, getProviderModeCapability, type Conversat
 import { claimAgentSession, DEFAULT_LEASE_MS, newWorkerId, releasedLeaseFields, startHeartbeat } from "./worker-lease.js";
 
 const MAX_ASSISTANT_MESSAGE_BYTES = 65_536;
-const DEFAULT_TIMEOUT_MS = Number(process.env.PROJECT_RELAY_CONVERSATION_TIMEOUT_MS ?? 120_000);
+const MIN_TIMEOUT_MS = 60_000;
+const MAX_TIMEOUT_MS = 2_700_000;
+type TimeoutPolicy = { inactivityMs: number; absoluteMs: number };
+const DEFAULT_TIMEOUTS: Record<ConversationMode, TimeoutPolicy> = {
+  ASK: { inactivityMs: 180_000, absoluteMs: 900_000 }, REVIEW: { inactivityMs: 300_000, absoluteMs: 1_200_000 },
+  IMPLEMENT: { inactivityMs: 300_000, absoluteMs: 2_700_000 }, CONTINUE: { inactivityMs: 300_000, absoluteMs: 2_700_000 }, VERIFY: { inactivityMs: 300_000, absoluteMs: 1_800_000 }
+};
 /** Stable for the lifetime of this process; every claim/heartbeat from this worker shares one identity unless a caller injects its own (e.g. tests simulating multiple workers). */
 const PROCESS_WORKER_ID = newWorkerId();
 
@@ -70,6 +76,14 @@ export type ConversationWorkerDeps = {
   workerId?: string;
   leaseMs?: number;
 };
+export class ProviderExecutionTimeout extends Error { constructor(readonly code: "PROVIDER_INACTIVITY_TIMEOUT" | "PROVIDER_ABSOLUTE_TIMEOUT") { super(code === "PROVIDER_INACTIVITY_TIMEOUT" ? "The provider stopped producing progress." : "The execution exceeded its maximum allowed duration."); } }
+function bounded(value: string | undefined, fallback: number) { const n = Number(value); return Number.isFinite(n) ? Math.min(MAX_TIMEOUT_MS, Math.max(MIN_TIMEOUT_MS, n)) : fallback; }
+export function providerTimeoutPolicy(providerId: string, mode: ConversationMode, legacy?: number): TimeoutPolicy {
+  // Dependency injection is test/worker-internal only; browser requests never reach this value.
+  if (legacy) return { inactivityMs: legacy, absoluteMs: legacy };
+  const defaults = DEFAULT_TIMEOUTS[mode]; const prefix = providerId === "codex-cli" ? "CODEX" : "CLAUDE";
+  return { inactivityMs: bounded(process.env.PROJECT_RELAY_PROVIDER_INACTIVITY_MS, defaults.inactivityMs), absoluteMs: bounded(process.env[`PROJECT_RELAY_${prefix}_${mode}_MAX_MS`], defaults.absoluteMs) };
+}
 
 type LoadedAgentSession = Awaited<ReturnType<typeof loadAgentSession>>;
 type LoadedConversation = NonNullable<Awaited<ReturnType<typeof prisma.conversation.findUnique>>>;
@@ -136,37 +150,38 @@ async function executeProviderTurn(input: {
   providerAgentSession: ProviderAgentSession;
   capsule: TaskCapsuleContent;
   resume: boolean;
-  timeoutMs: number;
+  timeout: TimeoutPolicy;
   sessionId: string;
 }): Promise<string> {
   let assistantText = "";
+  const controller = new AbortController(); let timeoutCode: ProviderExecutionTimeout["code"] | undefined;
+  let inactivityTimer: ReturnType<typeof setTimeout> | undefined;
+  const abort = (code: ProviderExecutionTimeout["code"]) => { if (!timeoutCode) { timeoutCode = code; controller.abort(); void input.provider.cancelSession(input.providerAgentSession.id); } };
+  const activity = () => { if (inactivityTimer) clearTimeout(inactivityTimer); inactivityTimer = setTimeout(() => abort("PROVIDER_INACTIVITY_TIMEOUT"), input.timeout.inactivityMs); };
+  activity(); const absoluteTimer = setTimeout(() => abort("PROVIDER_ABSOLUTE_TIMEOUT"), input.timeout.absoluteMs);
   const consume = (async () => {
     for await (const item of input.provider.streamEvents(input.providerAgentSession.id)) {
       if (item.type === "stdout") assistantText += item.message;
+      activity();
       await event(input.sessionId, item.type, item.message, item.type === "stdout" || item.type === "stderr" ? item.type : undefined);
     }
   })();
-
-  const controller = new AbortController();
-  let timedOut = false;
-  const timer = setTimeout(() => { timedOut = true; controller.abort(); }, input.timeoutMs);
   try {
     if (input.resume) await input.provider.resumeSession(input.providerAgentSession, input.capsule, controller.signal);
     else await input.provider.startSession(input.providerAgentSession, input.capsule, controller.signal);
     await consume;
   } catch (runError) {
-    if (timedOut) throw new Error(`${input.provider.name} execution timed out after ${input.timeoutMs}ms.`);
+    if (timeoutCode) throw new ProviderExecutionTimeout(timeoutCode);
     throw runError;
   } finally {
-    clearTimeout(timer);
+    if (inactivityTimer) clearTimeout(inactivityTimer); clearTimeout(absoluteTimer);
   }
-  if (timedOut) throw new Error(`${input.provider.name} execution timed out after ${input.timeoutMs}ms.`);
+  if (timeoutCode) throw new ProviderExecutionTimeout(timeoutCode);
   return assistantText;
 }
 
 export async function processConversationMessage(job: Job<ConversationMessageJob>, deps: ConversationWorkerDeps = {}): Promise<void> {
   const registry = deps.registry ?? defaultRegistry;
-  const timeoutMs = deps.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const workerId = deps.workerId ?? PROCESS_WORKER_ID;
   const leaseMs = deps.leaseMs ?? DEFAULT_LEASE_MS;
   const data = conversationMessageJobSchema.parse(job.data);
@@ -176,7 +191,7 @@ export async function processConversationMessage(job: Job<ConversationMessageJob
 
   const stopHeartbeat = startHeartbeat(data.sessionId, workerId, leaseMs);
   try {
-    await processClaimedConversationMessage({ data, registry, timeoutMs, workerId });
+    await processClaimedConversationMessage({ data, registry, ...(deps.timeoutMs !== undefined ? { timeoutMs: deps.timeoutMs } : {}), workerId });
   } finally {
     stopHeartbeat();
   }
@@ -185,7 +200,7 @@ export async function processConversationMessage(job: Job<ConversationMessageJob
 async function processClaimedConversationMessage(input: {
   data: ConversationMessageJob;
   registry: Pick<ProviderRegistry, "get">;
-  timeoutMs: number;
+  timeoutMs?: number;
   workerId: string;
 }): Promise<void> {
   const { data, registry, timeoutMs, workerId } = input;
@@ -258,7 +273,7 @@ async function processClaimedConversationMessage(input: {
 
     let assistantText: string;
     try {
-      assistantText = await executeProviderTurn({ provider, providerAgentSession, capsule, resume: Boolean(resumeExternalId), timeoutMs, sessionId: session.id });
+      assistantText = await executeProviderTurn({ provider, providerAgentSession, capsule, resume: Boolean(resumeExternalId), timeout: providerTimeoutPolicy(session.providerId, userMessage.mode as ConversationMode, timeoutMs), sessionId: session.id });
     } catch (runError) {
       if (!resumeExternalId || !(runError instanceof StaleProviderSessionError)) throw runError;
       // The resumed external session is gone: fall back safely to a brand new provider
@@ -271,7 +286,7 @@ async function processClaimedConversationMessage(input: {
         capability,
         ...(role ? { role } : {})
       });
-      assistantText = await executeProviderTurn({ provider, providerAgentSession, capsule, resume: false, timeoutMs, sessionId: session.id });
+      assistantText = await executeProviderTurn({ provider, providerAgentSession, capsule, resume: false, timeout: providerTimeoutPolicy(session.providerId, userMessage.mode as ConversationMode, timeoutMs), sessionId: session.id });
     }
 
     const usage = await provider.getUsage(providerAgentSession.id);
@@ -308,9 +323,11 @@ async function processClaimedConversationMessage(input: {
     });
     await event(session.id, "state", "Conversation execution completed.");
   } catch (error) {
-    const message = redactSecrets(error instanceof Error ? error.message : "Worker failure").slice(0, MAX_ASSISTANT_MESSAGE_BYTES);
+    const timeout = error instanceof ProviderExecutionTimeout ? error : undefined;
+    const code = timeout?.code ?? "PROVIDER_PROCESS_ERROR";
+    const message = redactSecrets(timeout?.message ?? (error instanceof Error ? error.message : "Provider process failed.")).slice(0, MAX_ASSISTANT_MESSAGE_BYTES);
     await prisma.$transaction(async tx => {
-      const finalized = await tx.agentSession.updateMany({ where: { id: session.id, state: { in: ["RUNNING", "STARTING"] }, workerId }, data: { state: "FAILED", endedAt: new Date(), error: message, ...releasedLeaseFields } });
+      const finalized = await tx.agentSession.updateMany({ where: { id: session.id, state: { in: ["RUNNING", "STARTING"] }, workerId }, data: { state: timeout ? "TIMED_OUT" : "FAILED", endedAt: new Date(), error: message, failureCode: code, ...releasedLeaseFields } });
       if (!finalized.count) return;
       await tx.conversationMessage.create({
         data: {

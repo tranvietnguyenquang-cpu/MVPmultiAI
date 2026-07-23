@@ -136,3 +136,17 @@ export async function getConversationExecution(executionId:string){
   ]);
   return{agentSession,events,assistantMessage,providerSession};
 }
+
+export async function retryConversationExecution(input:{executionId:string;providerId:string;idempotencyKey:string}){
+  return prisma.$transaction(async tx=>{
+    const original=await tx.agentSession.findUniqueOrThrow({where:{id:input.executionId},include:{userMessage:true}});
+    if(!original.userMessage||!original.conversationId||!["FAILED","TIMED_OUT","CANCELLED"].includes(original.state))throw new Error("Execution is not retryable.");
+    if(!getProviderModeCapability(input.providerId,original.userMessage.mode))throw new Error(`${input.providerId} does not support ${original.userMessage.mode} execution.`);
+    const active=await tx.agentSession.findFirst({where:{conversationId:original.conversationId,userMessageId:original.userMessageId,providerId:input.providerId,state:{in:["QUEUED","STARTING","RUNNING"]}}});if(active)return active;
+    const ps=await tx.providerSession.findFirst({where:{conversationId:original.conversationId,providerId:input.providerId,status:"RUNNING"},orderBy:{startedAt:"desc"}})??await tx.providerSession.create({data:{conversationId:original.conversationId,providerId:input.providerId,status:"RUNNING",startedAt:new Date()}});
+    const retry=await tx.agentSession.create({data:{projectId:original.projectId,taskId:original.taskId,providerId:input.providerId,state:"QUEUED",purpose:original.purpose,readOnly:original.readOnly,providerSessionId:ps.id,conversationId:original.conversationId,userMessageId:original.userMessageId}});
+    const routing=await tx.routingDecision.create({data:{conversationId:original.conversationId,userMessageId:original.userMessageId,requestedProviderId:input.providerId,selectedProviderId:input.providerId,reason:"User-requested retry",providerHealthSnapshot:{retryOf:original.id,idempotencyKey:input.idempotencyKey}}});
+    await createOutboxEventWithClient(tx,{topic:"conversation-message",jobId:retry.id,payload:{sessionId:retry.id,taskId:retry.taskId,conversationId:original.conversationId,messageId:original.userMessageId!,providerId:input.providerId,routingDecisionId:routing.id,providerSessionId:ps.id}});
+    return retry;
+  });
+}

@@ -24,6 +24,8 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     return NextResponse.json({
       status: execution.agentSession.state,
       selectedProvider: execution.agentSession.providerId,
+      startedAt: execution.agentSession.startedAt ?? execution.agentSession.createdAt,
+      failureCode: execution.agentSession.failureCode,
       providerSession: execution.providerSession ? toProviderSessionDto(execution.providerSession) : null,
       events: execution.events.map(item => ({
         id: item.id.toString(),

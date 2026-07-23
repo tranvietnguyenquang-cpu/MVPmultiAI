@@ -5,7 +5,14 @@ import { prisma, queueConversationMessage } from "@project-relay/database";
 import type { AgentSession as ProviderAgentSession, CodingProvider, ProviderProbe } from "@project-relay/providers";
 import type { ConversationMessageJob, TaskCapsuleContent } from "@project-relay/shared";
 import { StaleProviderSessionError } from "@project-relay/providers";
-import { processConversationMessage } from "./conversation-worker.js";
+import { processConversationMessage, providerTimeoutPolicy } from "./conversation-worker.js";
+
+describe("provider timeout policy", () => {
+  it("uses bounded server-side per-mode defaults", () => {
+    expect(providerTimeoutPolicy("codex-cli", "ASK")).toEqual({ inactivityMs: 180_000, absoluteMs: 900_000 });
+    expect(providerTimeoutPolicy("claude-cli", "REVIEW").absoluteMs).toBe(1_200_000);
+  });
+});
 
 type FakeProviderOverrides = Partial<{
   available: boolean;
@@ -290,11 +297,12 @@ describe("conversation worker execution", () => {
     const fake = makeFakeProvider("codex-cli", { startSession: hangingStart, streamEvents: async function* () { await new Promise(() => undefined); } });
     const { payload } = await queueTestMessage({ conversationId: conversation.id, projectId, content: "hello", selectedProviderId: "codex-cli" });
 
-    await expect(processConversationMessage({ data: payload } as unknown as Job<ConversationMessageJob>, { registry: makeRegistry({ "codex-cli": fake.provider }), timeoutMs: 30 })).rejects.toThrow(/timed out/i);
+    await expect(processConversationMessage({ data: payload } as unknown as Job<ConversationMessageJob>, { registry: makeRegistry({ "codex-cli": fake.provider }), timeoutMs: 30 })).rejects.toThrow(/stopped producing progress/i);
 
     const session = await prisma.agentSession.findUniqueOrThrow({ where: { id: payload.sessionId } });
-    expect(session.state).toBe("FAILED");
-    expect(session.error).toMatch(/timed out/i);
+    expect(session.state).toBe("TIMED_OUT");
+    expect(session.failureCode).toBe("PROVIDER_INACTIVITY_TIMEOUT");
+    expect(session.error).toMatch(/stopped producing progress/i);
   }, 10_000);
 
   it("enforces an output limit on the persisted assistant message", async () => {
