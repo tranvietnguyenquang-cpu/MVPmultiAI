@@ -74,10 +74,16 @@ async function buildConversationCapsule(input: {
 export type ConversationWorkerDeps = {
   registry?: Pick<ProviderRegistry, "get">;
   timeoutMs?: number;
+  /** Worker/test-only override; browser requests cannot provide timeout policy. */
+  timeoutPolicy?: TimeoutPolicy;
   workerId?: string;
   leaseMs?: number;
 };
 export class ProviderExecutionTimeout extends Error { constructor(readonly code: "PROVIDER_INACTIVITY_TIMEOUT" | "PROVIDER_ABSOLUTE_TIMEOUT") { super(code === "PROVIDER_INACTIVITY_TIMEOUT" ? "The provider stopped producing progress." : "The execution exceeded its maximum allowed duration."); } }
+export class ProviderExecutionCancelled extends Error {
+  readonly code = "PROVIDER_CANCELLED";
+  constructor() { super("Execution cancelled by user."); }
+}
 function bounded(value: string | undefined, fallback: number) { const n = Number(value); return Number.isFinite(n) ? Math.min(MAX_TIMEOUT_MS, Math.max(MIN_TIMEOUT_MS, n)) : fallback; }
 export function providerTimeoutPolicy(providerId: string, mode: ConversationMode, legacy?: number): TimeoutPolicy {
   // Dependency injection is test/worker-internal only; browser requests never reach this value.
@@ -130,6 +136,7 @@ function ownershipLifecycle(input: {
         data: {
           providerRootPid: start.pid,
           providerProcessStartedAt: start.processStartedAt,
+          providerProcessStartIdentity: start.processStartIdentity,
           state: "RUNNING",
         },
       });
@@ -166,6 +173,99 @@ function ownershipLifecycle(input: {
       });
     },
   };
+}
+
+type RecordedTerminationReason = "CANCELLED" | "INACTIVITY_TIMEOUT" | "ABSOLUTE_TIMEOUT";
+
+/**
+ * Terminates a provider only after loading the root PID and exact OS start identity
+ * recorded for this AgentSession. A PID is never sufficient on its own on Windows.
+ * This is deliberately worker-only; browser callers can request cancellation but
+ * cannot pass a PID, identity, or termination command.
+ */
+export async function terminateRecordedProviderProcess(input: {
+  agentSessionId: string;
+  reason: RecordedTerminationReason;
+  targetState?: "TIMED_OUT" | "CANCELLED";
+  failureCode?: "PROVIDER_INACTIVITY_TIMEOUT" | "PROVIDER_ABSOLUTE_TIMEOUT" | "PROVIDER_CANCELLED";
+  workerId?: string;
+}): Promise<"TERMINATED" | "ALREADY_EXITED" | "IDENTITY_MISMATCH" | "OWNERSHIP_MISSING" | "TERMINATION_UNCONFIRMED"> {
+  const session = await prisma.agentSession.findUnique({
+    where: { id: input.agentSessionId },
+    select: {
+      providerRootPid: true,
+      providerProcessStartIdentity: true,
+      state: true,
+    },
+  });
+  if (!session) return "OWNERSHIP_MISSING";
+
+  const requestedAt = new Date();
+  await prisma.agentSession.updateMany({
+    where: {
+      id: input.agentSessionId,
+      ...(input.targetState === "TIMED_OUT" ? { state: { in: ["STARTING", "RUNNING"] } } : {}),
+      ...(input.workerId ? { workerId: input.workerId } : {}),
+    },
+    data: {
+      ...(input.targetState ? { state: input.targetState, endedAt: requestedAt } : {}),
+      ...(input.failureCode ? { failureCode: input.failureCode } : {}),
+      ...(input.failureCode === "PROVIDER_INACTIVITY_TIMEOUT"
+        ? { error: "The provider stopped producing progress." }
+        : input.failureCode === "PROVIDER_ABSOLUTE_TIMEOUT"
+          ? { error: "The execution exceeded its maximum allowed duration." }
+          : input.failureCode === "PROVIDER_CANCELLED"
+            ? { error: "Execution cancelled by user." }
+            : {}),
+      providerTerminationRequestedAt: requestedAt,
+      providerTerminationReason: input.reason,
+      ...(input.targetState ? releasedLeaseFields : {}),
+    },
+  });
+
+  if (!session.providerRootPid || !session.providerProcessStartIdentity) {
+    await prisma.agentSession.updateMany({
+      where: { id: input.agentSessionId },
+      data: {
+        failureCode: "PROVIDER_OWNERSHIP_UNPROVEN",
+        error: "Provider process termination could not be proven.",
+        providerTerminationCompletedAt: new Date(),
+        providerTerminationResult: "OWNERSHIP_MISSING",
+      },
+    });
+    return "OWNERSHIP_MISSING";
+  }
+
+  let result: "TERMINATED" | "ALREADY_EXITED" | "IDENTITY_MISMATCH" | "TERMINATION_UNCONFIRMED";
+  try {
+    result = await terminateOwnedProcessTree({
+      rootPid: session.providerRootPid,
+      expectedStartIdentity: session.providerProcessStartIdentity,
+      agentSessionId: input.agentSessionId,
+      reason: input.reason,
+    });
+  } catch {
+    result = "TERMINATION_UNCONFIRMED";
+  }
+  await prisma.agentSession.updateMany({
+    where: { id: input.agentSessionId },
+    data: {
+      ...(result === "IDENTITY_MISMATCH"
+        ? {
+            failureCode: "PROVIDER_PROCESS_IDENTITY_MISMATCH",
+            error: "Provider process identity no longer matches the recorded execution.",
+          }
+        : result === "TERMINATION_UNCONFIRMED"
+          ? {
+              failureCode: "PROVIDER_TERMINATION_UNCONFIRMED",
+              error: "Provider process termination could not be confirmed.",
+            }
+        : {}),
+      providerTerminationCompletedAt: new Date(),
+      providerTerminationResult: result,
+    },
+  });
+  return result;
 }
 
 /**
@@ -221,13 +321,48 @@ async function executeProviderTurn(input: {
   resume: boolean;
   timeout: TimeoutPolicy;
   sessionId: string;
+  workerId: string;
 }): Promise<string> {
   let assistantText = "";
-  const controller = new AbortController(); let timeoutCode: ProviderExecutionTimeout["code"] | undefined;
+  const controller = new AbortController();
+  let timeoutCode: ProviderExecutionTimeout["code"] | undefined;
+  let cancellationRequested = false;
+  let termination: Promise<unknown> | undefined;
   let inactivityTimer: ReturnType<typeof setTimeout> | undefined;
-  const abort = (code: ProviderExecutionTimeout["code"]) => { if (!timeoutCode) { timeoutCode = code; controller.abort(); void input.provider.cancelSession(input.providerAgentSession.id); } };
-  const activity = () => { if (inactivityTimer) clearTimeout(inactivityTimer); inactivityTimer = setTimeout(() => abort("PROVIDER_INACTIVITY_TIMEOUT"), input.timeout.inactivityMs); };
-  activity(); const absoluteTimer = setTimeout(() => abort("PROVIDER_ABSOLUTE_TIMEOUT"), input.timeout.absoluteMs);
+  const terminate = (reason: RecordedTerminationReason, code: ProviderExecutionTimeout["code"] | "PROVIDER_CANCELLED") => {
+    termination ??= terminateRecordedProviderProcess({
+      agentSessionId: input.sessionId,
+      reason,
+      targetState: code === "PROVIDER_CANCELLED" ? "CANCELLED" : "TIMED_OUT",
+      failureCode: code,
+      workerId: input.workerId,
+    });
+    controller.abort();
+    void input.provider.cancelSession(input.providerAgentSession.id);
+  };
+  const abort = (code: ProviderExecutionTimeout["code"]) => {
+    if (!timeoutCode && !cancellationRequested) {
+      timeoutCode = code;
+      terminate(code === "PROVIDER_INACTIVITY_TIMEOUT" ? "INACTIVITY_TIMEOUT" : "ABSOLUTE_TIMEOUT", code);
+    }
+  };
+  const activity = () => {
+    if (inactivityTimer) clearTimeout(inactivityTimer);
+    inactivityTimer = setTimeout(() => abort("PROVIDER_INACTIVITY_TIMEOUT"), input.timeout.inactivityMs);
+  };
+  const cancellationTimer = setInterval(() => {
+    void prisma.agentSession.findUnique({ where: { id: input.sessionId }, select: { state: true, workerId: true } })
+      .then((session) => {
+        if (session?.state === "CANCELLED" && session.workerId === input.workerId && !cancellationRequested) {
+          cancellationRequested = true;
+          terminate("CANCELLED", "PROVIDER_CANCELLED");
+        }
+      })
+      .catch(() => undefined);
+  }, 250);
+  cancellationTimer.unref?.();
+  activity();
+  const absoluteTimer = setTimeout(() => abort("PROVIDER_ABSOLUTE_TIMEOUT"), input.timeout.absoluteMs);
   const consume = (async () => {
     for await (const item of input.provider.streamEvents(input.providerAgentSession.id)) {
       if (item.type === "stdout") assistantText += item.message;
@@ -243,11 +378,17 @@ async function executeProviderTurn(input: {
     else await input.provider.startSession(input.providerAgentSession, input.capsule, controller.signal);
     await consume;
   } catch (runError) {
+    if (termination) await termination;
+    if (cancellationRequested) throw new ProviderExecutionCancelled();
     if (timeoutCode) throw new ProviderExecutionTimeout(timeoutCode);
     throw runError;
   } finally {
-    if (inactivityTimer) clearTimeout(inactivityTimer); clearTimeout(absoluteTimer);
+    if (inactivityTimer) clearTimeout(inactivityTimer);
+    clearTimeout(absoluteTimer);
+    clearInterval(cancellationTimer);
   }
+  if (termination) await termination;
+  if (cancellationRequested) throw new ProviderExecutionCancelled();
   if (timeoutCode) throw new ProviderExecutionTimeout(timeoutCode);
   return assistantText;
 }
@@ -263,7 +404,13 @@ export async function processConversationMessage(job: Job<ConversationMessageJob
 
   const stopHeartbeat = startHeartbeat(data.sessionId, workerId, leaseMs);
   try {
-    await processClaimedConversationMessage({ data, registry, ...(deps.timeoutMs !== undefined ? { timeoutMs: deps.timeoutMs } : {}), workerId });
+    await processClaimedConversationMessage({
+      data,
+      registry,
+      ...(deps.timeoutMs !== undefined ? { timeoutMs: deps.timeoutMs } : {}),
+      ...(deps.timeoutPolicy ? { timeoutPolicy: deps.timeoutPolicy } : {}),
+      workerId,
+    });
   } finally {
     stopHeartbeat();
   }
@@ -273,9 +420,10 @@ async function processClaimedConversationMessage(input: {
   data: ConversationMessageJob;
   registry: Pick<ProviderRegistry, "get">;
   timeoutMs?: number;
+  timeoutPolicy?: TimeoutPolicy;
   workerId: string;
 }): Promise<void> {
-  const { data, registry, timeoutMs, workerId } = input;
+  const { data, registry, timeoutMs, timeoutPolicy, workerId } = input;
 
   const session = await loadAgentSession(data.sessionId);
   if (!session) throw new Error("Queued conversation execution references a missing agent session.");
@@ -345,7 +493,7 @@ async function processClaimedConversationMessage(input: {
 
     let assistantText: string;
     try {
-      assistantText = await executeProviderTurn({ provider, providerAgentSession, capsule, resume: Boolean(resumeExternalId), timeout: providerTimeoutPolicy(session.providerId, userMessage.mode as ConversationMode, timeoutMs), sessionId: session.id });
+      assistantText = await executeProviderTurn({ provider, providerAgentSession, capsule, resume: Boolean(resumeExternalId), timeout: timeoutPolicy ?? providerTimeoutPolicy(session.providerId, userMessage.mode as ConversationMode, timeoutMs), sessionId: session.id, workerId });
     } catch (runError) {
       if (!resumeExternalId || !(runError instanceof StaleProviderSessionError)) throw runError;
       // The resumed external session is gone: fall back safely to a brand new provider
@@ -359,7 +507,7 @@ async function processClaimedConversationMessage(input: {
         ...(role ? { role } : {}),
         processLifecycle: ownershipLifecycle({ agentSessionId: session.id, providerId: session.providerId, workerId }),
       });
-      assistantText = await executeProviderTurn({ provider, providerAgentSession, capsule, resume: false, timeout: providerTimeoutPolicy(session.providerId, userMessage.mode as ConversationMode, timeoutMs), sessionId: session.id });
+      assistantText = await executeProviderTurn({ provider, providerAgentSession, capsule, resume: false, timeout: timeoutPolicy ?? providerTimeoutPolicy(session.providerId, userMessage.mode as ConversationMode, timeoutMs), sessionId: session.id, workerId });
     }
 
     const usage = await provider.getUsage(providerAgentSession.id);
@@ -368,12 +516,12 @@ async function processClaimedConversationMessage(input: {
     // provider genuinely never reported one, and that must be persisted as null.
     const externalSessionId = providerAgentSession.externalId ?? null;
 
-    await prisma.$transaction(async tx => {
+    const completed = await prisma.$transaction(async tx => {
       const finalized = await tx.agentSession.updateMany({
         where: { id: session.id, state: "RUNNING", workerId },
         data: { state: "SUCCEEDED", endedAt: new Date(), exitCode: 0, usage, externalId: externalSessionId, ...releasedLeaseFields }
       });
-      if (!finalized.count) return;
+      if (!finalized.count) return false;
       const assistantMessage = await tx.conversationMessage.create({
         data: {
           conversationId: conversation.id,
@@ -393,14 +541,16 @@ async function processClaimedConversationMessage(input: {
         data: { status: "RUNNING", lastMessageId: assistantMessage.id, externalSessionId }
       });
       await tx.conversation.update({ where: { id: conversation.id }, data: { activeProviderId: session.providerId } });
+      return true;
     });
-    await event(session.id, "state", "Conversation execution completed.");
+    if (completed) await event(session.id, "state", "Conversation execution completed.");
   } catch (error) {
     const timeout = error instanceof ProviderExecutionTimeout ? error : undefined;
-    const code = timeout?.code ?? "PROVIDER_PROCESS_ERROR";
-    const message = redactSecrets(timeout?.message ?? (error instanceof Error ? error.message : "Provider process failed.")).slice(0, MAX_ASSISTANT_MESSAGE_BYTES);
+    const cancelled = error instanceof ProviderExecutionCancelled;
+    const code = timeout?.code ?? (cancelled ? "PROVIDER_CANCELLED" : "PROVIDER_PROCESS_ERROR");
+    const message = redactSecrets(timeout?.message ?? (cancelled ? "Execution cancelled by user." : error instanceof Error ? error.message : "Provider process failed.")).slice(0, MAX_ASSISTANT_MESSAGE_BYTES);
     await prisma.$transaction(async tx => {
-      const finalized = await tx.agentSession.updateMany({ where: { id: session.id, state: { in: ["RUNNING", "STARTING"] }, workerId }, data: { state: timeout ? "TIMED_OUT" : "FAILED", endedAt: new Date(), error: message, failureCode: code, ...releasedLeaseFields } });
+      const finalized = await tx.agentSession.updateMany({ where: { id: session.id, state: { in: ["RUNNING", "STARTING"] }, workerId }, data: { state: timeout ? "TIMED_OUT" : cancelled ? "CANCELLED" : "FAILED", endedAt: new Date(), error: message, failureCode: code, ...releasedLeaseFields } });
       if (!finalized.count) return;
       await tx.conversationMessage.create({
         data: {

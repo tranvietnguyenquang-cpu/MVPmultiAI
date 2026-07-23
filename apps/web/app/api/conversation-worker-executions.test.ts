@@ -114,6 +114,7 @@ describe("conversation execution-state API authorization", () => {
       data: {
         providerRootPid: 44_444,
         providerProcessStartedAt: new Date("2026-07-23T00:00:00.000Z"),
+        providerProcessStartIdentity: "2026-07-23T00:00:00.0000000Z",
         providerTerminationReason: "OWNERSHIP_FAILURE",
       },
     });
@@ -125,6 +126,7 @@ describe("conversation execution-state API authorization", () => {
     expect(response.status).toBe(200);
     expect(body).not.toHaveProperty("providerRootPid");
     expect(body).not.toHaveProperty("providerProcessStartedAt");
+    expect(body).not.toHaveProperty("providerProcessStartIdentity");
     expect(body).not.toHaveProperty("providerTerminationReason");
   });
 });

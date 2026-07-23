@@ -3,8 +3,11 @@ import { once } from "node:events";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
+import { prisma, queueConversationMessage } from "@project-relay/database";
 import { captureOwnedProcess, terminateOwnedProcessTree } from "./owned-process.js";
+import { terminateRecordedProviderProcess } from "./conversation-worker.js";
 
 const execFileAsync = promisify(execFile);
 const fixture = path.join(path.dirname(fileURLToPath(import.meta.url)), "owned-process.fixture.cjs");
@@ -93,6 +96,81 @@ describe("owned Windows provider process trees", () => {
       if (sibling.pid) await waitForExit(sibling.pid).catch(() => undefined);
     }
   }, 15_000);
+
+  it("records and terminates the persisted timeout tree without touching a sibling", async () => {
+    const project = await prisma.project.create({
+      data: {
+        name: `owned-tree-timeout-${randomUUID()}`,
+        repositoryPath: `/tmp/owned-tree-timeout-${randomUUID()}`,
+        allowedCommands: [],
+        permittedPaths: [],
+      },
+    });
+    const conversation = await prisma.conversation.create({ data: { projectId: project.id, title: "Owned timeout" } });
+    const queued = await queueConversationMessage({
+      conversationId: conversation.id,
+      projectId: project.id,
+      content: "fixture termination",
+      mode: "ASK",
+      selectedProviderId: "codex-cli",
+      reason: "test",
+      providerHealthSnapshot: {},
+      previousAssistantMessage: null,
+      idempotencyKey: randomUUID(),
+    });
+    const root = spawnFixture("root");
+    const sibling = spawnFixture("sibling");
+    let rootPids: TreePids | undefined;
+    let owned: Awaited<ReturnType<typeof captureOwnedProcess>> | undefined;
+
+    try {
+      rootPids = await readTree(root);
+      owned = await captureOwnedProcess({
+        rootPid: rootPids.rootPid,
+        agentSessionId: queued.agentSession.id,
+        providerId: "codex-cli",
+        workerId: "fixture-worker",
+      });
+      await prisma.agentSession.update({
+        where: { id: queued.agentSession.id },
+        data: {
+          state: "RUNNING",
+          workerId: "fixture-worker",
+          providerRootPid: owned.rootPid,
+          providerProcessStartedAt: new Date(owned.startedAt),
+          providerProcessStartIdentity: owned.startedAt,
+        },
+      });
+
+      expect(await terminateRecordedProviderProcess({
+        agentSessionId: queued.agentSession.id,
+        workerId: "fixture-worker",
+        reason: "INACTIVITY_TIMEOUT",
+        targetState: "TIMED_OUT",
+        failureCode: "PROVIDER_INACTIVITY_TIMEOUT",
+      })).toBe("TERMINATED");
+      await Promise.all([waitForExit(rootPids.rootPid), waitForExit(rootPids.childPid), waitForExit(rootPids.grandchildPid)]);
+      expect(await processExists(sibling.pid!)).toBe(true);
+      const session = await prisma.agentSession.findUniqueOrThrow({ where: { id: queued.agentSession.id } });
+      expect(session.state).toBe("TIMED_OUT");
+      expect(session.failureCode).toBe("PROVIDER_INACTIVITY_TIMEOUT");
+      expect(session.providerTerminationReason).toBe("INACTIVITY_TIMEOUT");
+      expect(session.providerTerminationResult).toBe("TERMINATED");
+      expect(session.providerTerminationCompletedAt).toBeTruthy();
+    } finally {
+      if (owned && rootPids && (await processExists(rootPids.rootPid))) {
+        await terminateOwnedProcessTree({
+          rootPid: owned.rootPid,
+          expectedStartIdentity: owned.startedAt,
+          agentSessionId: queued.agentSession.id,
+          reason: "INACTIVITY_TIMEOUT",
+        }).catch(() => undefined);
+      }
+      sibling.kill();
+      if (sibling.pid) await waitForExit(sibling.pid).catch(() => undefined);
+      await prisma.project.delete({ where: { id: project.id } }).catch(() => undefined);
+    }
+  }, 20_000);
 
   it("refuses a PID with a mismatched start identity and safely handles an already-exited tree", async () => {
     const child = spawnFixture("sibling");

@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { hostname } from "node:os";
 import { prisma } from "@project-relay/database";
+import { terminateOwnedProcessTree } from "./owned-process.js";
 
 export const DEFAULT_LEASE_MS = Number(process.env.PROJECT_RELAY_WORKER_LEASE_MS ?? 60_000);
 const IN_PROGRESS_STATES = ["STARTING", "RUNNING"] as const;
@@ -45,6 +46,8 @@ type ExpiredSession = {
   taskId: string;
   conversationId: string | null;
   providerSessionId: string | null;
+  providerRootPid: number | null;
+  providerProcessStartIdentity: string | null;
   userMessage: { mode: "ASK" | "IMPLEMENT" | "REVIEW" | "CONTINUE" | "VERIFY" } | null;
 };
 
@@ -58,7 +61,16 @@ type ExpiredSession = {
 export async function reapExpiredAgentSessions(now: Date = new Date()): Promise<number> {
   const candidates = await prisma.agentSession.findMany({
     where: { state: { in: [...IN_PROGRESS_STATES] }, OR: [{ leaseExpiresAt: null }, { leaseExpiresAt: { lt: now } }] },
-    select: { id: true, providerId: true, taskId: true, conversationId: true, providerSessionId: true, userMessage: { select: { mode: true } } }
+    select: {
+      id: true,
+      providerId: true,
+      taskId: true,
+      conversationId: true,
+      providerSessionId: true,
+      providerRootPid: true,
+      providerProcessStartIdentity: true,
+      userMessage: { select: { mode: true } },
+    }
   });
 
   let reaped = 0;
@@ -69,6 +81,30 @@ export async function reapExpiredAgentSessions(now: Date = new Date()): Promise<
     });
     if (!claimed.count) continue; // another reap sweep already reclaimed this row
     reaped++;
+
+    if (session.providerRootPid && session.providerProcessStartIdentity) {
+      const terminationRequestedAt = new Date();
+      await prisma.agentSession.updateMany({
+        where: { id: session.id, state: "FAILED" },
+        data: {
+          providerTerminationRequestedAt: terminationRequestedAt,
+          providerTerminationReason: "WORKER_RECOVERY",
+        },
+      });
+      const result = await terminateOwnedProcessTree({
+        rootPid: session.providerRootPid,
+        expectedStartIdentity: session.providerProcessStartIdentity,
+        agentSessionId: session.id,
+        reason: "WORKER_RECOVERY",
+      });
+      await prisma.agentSession.updateMany({
+        where: { id: session.id, state: "FAILED" },
+        data: {
+          providerTerminationCompletedAt: new Date(),
+          providerTerminationResult: result,
+        },
+      });
+    }
 
     await prisma.agentEvent.create({ data: { sessionId: session.id, type: "state", message: "Worker lease expired before the session completed." } }).catch(() => undefined);
 

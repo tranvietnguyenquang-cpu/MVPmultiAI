@@ -381,6 +381,9 @@ model AgentSession {
   failureCode String?
   providerRootPid Int?
   providerProcessStartedAt DateTime?
+  /// Exact operating-system start identity. This is intentionally separate from the
+  /// displayable timestamp because Windows exposes sub-millisecond precision.
+  providerProcessStartIdentity String?
   providerTerminationRequestedAt DateTime?
   providerTerminationCompletedAt DateTime?
   providerTerminationReason String?

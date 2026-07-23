@@ -22,6 +22,7 @@ type FakeProviderOverrides = Partial<{
   startSession: CodingProvider["startSession"];
   resumeSession: CodingProvider["resumeSession"];
   streamEvents: CodingProvider["streamEvents"];
+  cancelSession: CodingProvider["cancelSession"];
 }>;
 
 function makeFakeProvider(id: "codex-cli" | "claude-cli", overrides: FakeProviderOverrides = {}) {
@@ -73,7 +74,7 @@ function makeFakeProvider(id: "codex-cli" | "claude-cli", overrides: FakeProvide
     startSession,
     sendTask: async (session, capsule, signal) => { await provider.startSession(session, capsule, signal); },
     streamEvents,
-    cancelSession: vi.fn(async () => undefined),
+    cancelSession: vi.fn(overrides.cancelSession ?? (async () => undefined)),
     resumeSession: vi.fn(overrides.resumeSession ?? overrides.startSession ?? defaultStartSession),
     getUsage: vi.fn(async () => ({ estimated: true }))
   };
@@ -303,9 +304,16 @@ describe("conversation worker execution", () => {
 
   it("classifies a hung provider as a timeout", async () => {
     const conversation = await newConversation("Timeout classification");
-    const hangingStart: CodingProvider["startSession"] = (_session, _capsule, signal) => new Promise((_resolve, reject) => {
+    const hangingStart: CodingProvider["startSession"] = async (session, _capsule, signal) => {
+      await session.processLifecycle?.onProcessStarted({
+        pid: 31_417,
+        processStartIdentity: "2026-07-23T00:00:00.000Z",
+        processStartedAt: new Date("2026-07-23T00:00:00.000Z"),
+      });
+      return new Promise((_resolve, reject) => {
       signal?.addEventListener("abort", () => reject(new Error("process killed")));
-    });
+      });
+    };
     const fake = makeFakeProvider("codex-cli", { startSession: hangingStart, streamEvents: async function* () { await new Promise(() => undefined); } });
     const { payload } = await queueTestMessage({ conversationId: conversation.id, projectId, content: "hello", selectedProviderId: "codex-cli" });
 
@@ -315,6 +323,68 @@ describe("conversation worker execution", () => {
     expect(session.state).toBe("TIMED_OUT");
     expect(session.failureCode).toBe("PROVIDER_INACTIVITY_TIMEOUT");
     expect(session.error).toMatch(/stopped producing progress/i);
+  }, 10_000);
+
+  it("lets activity reset inactivity while the absolute timeout remains terminal", async () => {
+    const conversation = await newConversation("Absolute timeout classification");
+    let cancelled = false;
+    const activeStream: CodingProvider["streamEvents"] = async function* () {
+      while (!cancelled) {
+        yield { type: "state", message: "provider progress", timestamp: new Date() };
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+    };
+    const fake = makeFakeProvider("codex-cli", {
+      streamEvents: activeStream,
+      cancelSession: async () => { cancelled = true; },
+    });
+    const { payload } = await queueTestMessage({ conversationId: conversation.id, projectId, content: "keep working", selectedProviderId: "codex-cli" });
+
+    await expect(processConversationMessage(
+      { data: payload } as unknown as Job<ConversationMessageJob>,
+      { registry: makeRegistry({ "codex-cli": fake.provider }), timeoutPolicy: { inactivityMs: 35, absoluteMs: 100 } },
+    )).rejects.toThrow(/maximum allowed duration/i);
+
+    const session = await prisma.agentSession.findUniqueOrThrow({ where: { id: payload.sessionId } });
+    expect(session.state).toBe("TIMED_OUT");
+    expect(session.failureCode).toBe("PROVIDER_ABSOLUTE_TIMEOUT");
+    expect(session.error).toMatch(/maximum allowed duration/i);
+  }, 10_000);
+
+  it("observes a production cancellation request without allowing a late completion", async () => {
+    const conversation = await newConversation("Cancellation observation");
+    const hangingStart: CodingProvider["startSession"] = (_session, _capsule, signal) => new Promise((_resolve, reject) => {
+      signal?.addEventListener("abort", () => reject(new Error("provider process stopped")));
+    });
+    const fake = makeFakeProvider("codex-cli", {
+      startSession: hangingStart,
+      streamEvents: async function* () { await new Promise(() => undefined); },
+    });
+    const { payload } = await queueTestMessage({ conversationId: conversation.id, projectId, content: "cancel me", selectedProviderId: "codex-cli" });
+    const workerId = "cancel-observer";
+    const running = processConversationMessage(
+      { data: payload } as unknown as Job<ConversationMessageJob>,
+      { registry: makeRegistry({ "codex-cli": fake.provider }), workerId, timeoutMs: 5_000 },
+    );
+
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      const current = await prisma.agentSession.findUniqueOrThrow({ where: { id: payload.sessionId } });
+      if (current.state === "STARTING") break;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    await prisma.agentSession.update({
+      where: { id: payload.sessionId },
+      data: { state: "CANCELLED", failureCode: "PROVIDER_CANCELLED", error: "Execution cancelled by user." },
+    });
+
+    await expect(running).rejects.toThrow(/cancelled/i);
+    const session = await prisma.agentSession.findUniqueOrThrow({ where: { id: payload.sessionId } });
+    expect(session.state).toBe("CANCELLED");
+    expect(session.failureCode).toBe("PROVIDER_OWNERSHIP_UNPROVEN");
+    expect(session.error).toBe("Provider process termination could not be proven.");
+    expect(session.providerTerminationReason).toBe("CANCELLED");
+    expect(fake.provider.cancelSession).toHaveBeenCalledTimes(1);
+    expect(await prisma.conversationMessage.count({ where: { agentSessionId: payload.sessionId, status: "COMPLETED" } })).toBe(0);
   }, 10_000);
 
   it("enforces an output limit on the persisted assistant message", async () => {

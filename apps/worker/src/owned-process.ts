@@ -10,7 +10,7 @@ export type OwnedProcess = {
   providerId: string;
   workerId: string;
 };
-export type TerminationReason = "CANCELLED" | "INACTIVITY_TIMEOUT" | "ABSOLUTE_TIMEOUT" | "OWNERSHIP_FAILURE";
+export type TerminationReason = "CANCELLED" | "INACTIVITY_TIMEOUT" | "ABSOLUTE_TIMEOUT" | "OWNERSHIP_FAILURE" | "WORKER_RECOVERY";
 export type TerminationResult = "TERMINATED" | "ALREADY_EXITED" | "IDENTITY_MISMATCH";
 
 async function startIdentity(pid: number): Promise<string | undefined> {
