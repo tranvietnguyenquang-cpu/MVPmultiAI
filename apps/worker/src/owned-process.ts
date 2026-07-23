@@ -1,0 +1,8 @@
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+const execFileAsync=promisify(execFile);
+export type OwnedProcess={rootPid:number;startedAt:string;agentSessionId:string;providerId:string;workerId:string};
+export type TerminationResult="TERMINATED"|"ALREADY_EXITED"|"IDENTITY_MISMATCH";
+async function startIdentity(pid:number):Promise<string|undefined>{if(process.platform!=="win32")return undefined;try{const{stdout}=await execFileAsync("powershell.exe",["-NoProfile","-Command",`(Get-Process -Id ${pid} -ErrorAction Stop).StartTime.ToUniversalTime().ToString('O')`],{windowsHide:true});return stdout.trim()||undefined;}catch{return undefined;}}
+export async function captureOwnedProcess(input:Omit<OwnedProcess,"startedAt">):Promise<OwnedProcess>{const startedAt=await startIdentity(input.rootPid);if(!startedAt)throw new Error("Owned provider process exited before ownership could be recorded.");return{...input,startedAt};}
+export async function terminateOwnedProcessTree(input:{rootPid:number;expectedStartIdentity:string;agentSessionId:string;reason:"CANCELLED"|"INACTIVITY_TIMEOUT"|"ABSOLUTE_TIMEOUT"}):Promise<TerminationResult>{const current=await startIdentity(input.rootPid);if(!current)return"ALREADY_EXITED";if(current!==input.expectedStartIdentity)return"IDENTITY_MISMATCH";await execFileAsync("taskkill",["/pid",String(input.rootPid),"/t","/f"],{windowsHide:true}).catch(()=>undefined);for(let i=0;i<20;i++){if(!await startIdentity(input.rootPid))return"TERMINATED";await new Promise(r=>setTimeout(r,50));}throw new Error("Owned provider process did not exit after bounded termination.");}

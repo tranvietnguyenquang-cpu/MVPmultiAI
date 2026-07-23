@@ -379,6 +379,12 @@ model AgentSession {
   exitCode    Int?
   error       String?
   failureCode String?
+  providerRootPid Int?
+  providerProcessStartedAt DateTime?
+  providerTerminationRequestedAt DateTime?
+  providerTerminationCompletedAt DateTime?
+  providerTerminationReason String?
+  providerTerminationResult String?
   usage       Json?
   baselineCommit String?
   baselineDiffHash String?
