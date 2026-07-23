@@ -1,30 +1,36 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getConversationWithDetails } from "@project-relay/database";
+import { ApiError, apiErrorResponse } from "../../../../lib/api-errors";
+import { toConversationMessageDto, toHandoffCapsuleDto, toProviderSessionDto, toRoutingDecisionDto } from "../../../../lib/conversation-dto";
 import { findAccessibleProject } from "../../../../lib/project-access";
 
 export async function GET(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
-  const { id } = await params;
-  const projectId = request.nextUrl.searchParams.get("projectId");
-  if (!projectId) return NextResponse.json({ error: "projectId is required." }, { status: 400 });
+  try {
+    const { id } = await params;
+    const projectId = request.nextUrl.searchParams.get("projectId");
+    if (!projectId) throw new ApiError("VALIDATION_ERROR", "projectId is required.");
 
-  const project = await findAccessibleProject(projectId);
-  if (!project) return NextResponse.json({ error: "Project not found." }, { status: 404 });
+    const project = await findAccessibleProject(projectId);
+    if (!project) throw new ApiError("NOT_FOUND", "Project not found.");
 
-  const conversation = await getConversationWithDetails(id);
-  if (!conversation || conversation.projectId !== project.id) {
-    return NextResponse.json({ error: "Conversation not found." }, { status: 404 });
+    const conversation = await getConversationWithDetails(id);
+    if (!conversation || conversation.projectId !== project.id) throw new ApiError("NOT_FOUND", "Conversation not found.");
+
+    return NextResponse.json({
+      id: conversation.id,
+      projectId: conversation.projectId,
+      title: conversation.title,
+      status: conversation.status,
+      activeProviderId: conversation.activeProviderId,
+      currentCheckpointId: conversation.currentCheckpointId,
+      createdAt: conversation.createdAt,
+      updatedAt: conversation.updatedAt,
+      messages: conversation.messages.map(toConversationMessageDto),
+      providerSessions: conversation.providerSessions.map(toProviderSessionDto),
+      handoffCapsules: conversation.handoffCapsules.map(toHandoffCapsuleDto),
+      routingDecisions: conversation.routingDecisions.map(toRoutingDecisionDto)
+    });
+  } catch (error) {
+    return apiErrorResponse(error, "GET /api/conversations/[id]");
   }
-
-  return NextResponse.json({
-    ...conversation,
-    handoffCapsules: conversation.handoffCapsules.map((capsule: typeof conversation.handoffCapsules[number]) => ({
-      id: capsule.id,
-      conversationId: capsule.conversationId,
-      fromProviderId: capsule.fromProviderId,
-      toProviderId: capsule.toProviderId,
-      version: capsule.version,
-      checksum: capsule.checksum,
-      createdAt: capsule.createdAt
-    }))
-  });
 }

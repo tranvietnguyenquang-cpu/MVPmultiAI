@@ -57,8 +57,7 @@ export default async function ConversationPage({ params }: { params: Promise<{ i
   const providerSessions = conversation.providerSessions.map(session => ({
     id: session.id,
     providerId: session.providerId,
-    status: session.status,
-    externalSessionId: session.externalSessionId
+    status: session.status
   }));
 
   return (

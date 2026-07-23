@@ -40,7 +40,7 @@ function conversationFixture() {
       { id: "m1", role: "USER", providerId: null, providerSessionId: null, agentSessionId: null, taskId: null, mode: "ASK", content: "hello there", status: "COMPLETED", handoffCapsuleId: null, createdAt: new Date("2026-01-01T00:00:00Z") },
       { id: "m2", role: "ASSISTANT", providerId: "codex-cli", providerSessionId: "ps1", agentSessionId: "as1", taskId: "t1", mode: "ASK", content: "codex reply", status: "COMPLETED", handoffCapsuleId: null, createdAt: new Date("2026-01-01T00:01:00Z") }
     ],
-    providerSessions: [{ id: "ps1", providerId: "codex-cli", status: "RUNNING", externalSessionId: "ext-1" }],
+    providerSessions: [{ id: "ps1", providerId: "codex-cli", status: "RUNNING" }],
     handoffCapsules: [],
     routingDecisions: [{ id: "r1", requestedProviderId: "codex-cli", selectedProviderId: "codex-cli" }]
   };

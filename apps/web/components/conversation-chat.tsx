@@ -29,7 +29,7 @@ export type HandoffCapsuleView = {
   createdAt: string;
 };
 
-export type ProviderSessionView = { id: string; providerId: string; status: string; externalSessionId: string | null };
+export type ProviderSessionView = { id: string; providerId: string; status: string };
 export type ProviderHealthView = { installed: boolean; authentication: string; available: boolean; version: string | null };
 
 type ExecutionEventView = { id: string; type: string; stream: string | null; message: string; createdAt: string };
