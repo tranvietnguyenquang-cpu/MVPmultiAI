@@ -38,6 +38,12 @@ describe("transactional outbox", () => {
     });
   }
 
+  async function dueNow(jobId: string) {
+    const event = await getOutboxEventByJobId(jobId);
+    if (!event) throw new Error("Expected an outbox event.");
+    return { now: () => new Date(event.nextAttemptAt.getTime() + 1) };
+  }
+
   it("creates the outbox row atomically with the rest of the orchestration (no separate publish step)", async () => {
     const conversation = await newConversation("Atomic outbox creation");
     const result = await queueTestMessage(conversation.id);
@@ -86,7 +92,12 @@ describe("transactional outbox", () => {
     // Redis down: publish fails, but the DB record already committed durably (it happened
     // before this dispatch call even runs), so no execution is lost.
     const failingPublish = vi.fn(async () => { throw new Error("ECONNREFUSED: Redis unavailable"); });
-    const firstAttempt = await dispatchPendingOutboxEvents(failingPublish, 20, { jobId: result.agentSession.id });
+    const firstAttempt = await dispatchPendingOutboxEvents(
+      failingPublish,
+      20,
+      { jobId: result.agentSession.id },
+      await dueNow(result.agentSession.id),
+    );
     const failedResult = firstAttempt.find(item => item.jobId === result.agentSession.id);
     expect(failedResult?.status).toBe("failed");
 
@@ -116,7 +127,7 @@ describe("transactional outbox", () => {
       if (capturedJobIds.length === 1) throw new Error("transient failure");
     });
 
-    await dispatchPendingOutboxEvents(failThenSucceed, 20, { jobId: result.agentSession.id });
+    await dispatchPendingOutboxEvents(failThenSucceed, 20, { jobId: result.agentSession.id }, await dueNow(result.agentSession.id));
     const failed = await getOutboxEventByJobId(result.agentSession.id);
     await dispatchPendingOutboxEvents(failThenSucceed, 20, { jobId: result.agentSession.id }, { now: () => new Date(failed!.nextAttemptAt.getTime() + 1) });
 
@@ -129,7 +140,11 @@ describe("transactional outbox", () => {
 
     const scope = { jobId: result.agentSession.id };
     const publish = vi.fn(async () => undefined);
-    const [first, second] = await Promise.all([dispatchPendingOutboxEvents(publish, 20, scope), dispatchPendingOutboxEvents(publish, 20, scope)]);
+    const dependencies = await dueNow(result.agentSession.id);
+    const [first, second] = await Promise.all([
+      dispatchPendingOutboxEvents(publish, 20, scope, dependencies),
+      dispatchPendingOutboxEvents(publish, 20, scope, dependencies),
+    ]);
 
     const publishedCount = [...first, ...second].filter(item => item.jobId === result.agentSession.id && item.status === "published").length;
     expect(publishedCount).toBe(1);
