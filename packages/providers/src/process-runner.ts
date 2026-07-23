@@ -3,7 +3,13 @@ import { randomUUID } from "node:crypto";
 import crossSpawn from "cross-spawn";
 import { SAFE_ENVIRONMENT, StreamSafeRedactor, validateWorkspace } from "@project-relay/execution";
 import type { TaskCapsuleContent } from "@project-relay/shared";
-import { resolveCliExecutable, type ResolvedExecutable } from "./executable.js";
+import {
+  CliExecutableResolutionError,
+  classifyExecutableLaunchError,
+  resolveCliExecutable,
+  type ExecutableFailureCode,
+  type ResolvedExecutable,
+} from "./executable.js";
 import type {
   AgentEvent,
   AgentSession,
@@ -101,6 +107,7 @@ export abstract class CliProvider implements CodingProvider {
 
   protected readonly sessions = new Map<string, SessionRecord>();
   private resolved: ResolvedExecutable | undefined;
+  private resolutionFailure: ExecutableFailureCode | undefined;
 
   constructor(
     protected readonly spawnProcess: SpawnFn = crossSpawn,
@@ -109,9 +116,26 @@ export abstract class CliProvider implements CodingProvider {
 
   protected async resolve(): Promise<ResolvedExecutable | undefined> {
     if (!this.resolved) {
-      this.resolved = await this.resolver(this.command);
+      try {
+        this.resolved = await this.resolver(this.command);
+        this.resolutionFailure = undefined;
+      } catch (error) {
+        if (error instanceof CliExecutableResolutionError) {
+          this.resolutionFailure = error.code;
+          return undefined;
+        }
+        throw error;
+      }
     }
     return this.resolved;
+  }
+
+  private invalidateResolvedExecutable(error: unknown): void {
+    const failure = classifyExecutableLaunchError(error);
+    if (failure === "CLI_NOT_FOUND" || failure === "CLI_ACCESS_DENIED") {
+      this.resolved = undefined;
+      this.resolutionFailure = failure;
+    }
   }
 
   protected async execute(
@@ -123,7 +147,14 @@ export abstract class CliProvider implements CodingProvider {
   ): Promise<ProcessResult> {
     const executable = await this.resolve();
     if (!executable) {
-      return { code: null, output: "", durationMs: 0, timedOut: false, cancelled: false, error: "CLI_NOT_FOUND" };
+      return {
+        code: null,
+        output: "",
+        durationMs: 0,
+        timedOut: false,
+        cancelled: false,
+        error: this.resolutionFailure ?? "CLI_NOT_FOUND",
+      };
     }
 
     const started = Date.now();
@@ -137,13 +168,14 @@ export abstract class CliProvider implements CodingProvider {
           env: SAFE_ENVIRONMENT,
         });
       } catch (error) {
+        this.invalidateResolvedExecutable(error);
         resolve({
           code: null,
           output: "",
           durationMs: Date.now() - started,
           timedOut: false,
           cancelled: false,
-          error: error instanceof Error ? error.message : "CLI spawn failed",
+          error: classifyExecutableLaunchError(error),
         });
         return;
       }
@@ -154,7 +186,8 @@ export abstract class CliProvider implements CodingProvider {
       child.stdout?.on("data", (chunk: Buffer) => redactor.append(chunk));
       child.stderr?.on("data", (chunk: Buffer) => redactor.append(chunk));
       child.once("error", (event) => {
-        error = event.message;
+        this.invalidateResolvedExecutable(event);
+        error = classifyExecutableLaunchError(event);
       });
       const stop = () => {
         cancelled = true;
@@ -318,12 +351,19 @@ export abstract class CliProvider implements CodingProvider {
     };
 
     await new Promise<void>((resolve, reject) => {
-      const child = this.spawnProcess(executable.canonicalPath, this.sessionCommand(session, resume), {
-        cwd: session.workspace,
-        shell: false,
-        windowsHide: true,
-        env: SAFE_ENVIRONMENT,
-      });
+      let child: ChildProcess;
+      try {
+        child = this.spawnProcess(executable.canonicalPath, this.sessionCommand(session, resume), {
+          cwd: session.workspace,
+          shell: false,
+          windowsHide: true,
+          env: SAFE_ENVIRONMENT,
+        });
+      } catch (error) {
+        this.invalidateResolvedExecutable(error);
+        reject(new Error(classifyExecutableLaunchError(error)));
+        return;
+      }
       record.child = child;
       const err = new StreamSafeRedactor(65_536);
       const consumeLine = (line: ReaderLine) => {
@@ -344,7 +384,10 @@ export abstract class CliProvider implements CodingProvider {
       child.stderr?.on("data", (chunk: Buffer) => err.append(chunk));
       const abort = () => killProcessTree(child);
       effective.addEventListener("abort", abort, { once: true });
-      child.once("error", reject);
+      child.once("error", (error) => {
+        this.invalidateResolvedExecutable(error);
+        reject(error);
+      });
       child.once("close", (code) => {
         effective.removeEventListener("abort", abort);
         for (const line of reader.end()) consumeLine(line);
