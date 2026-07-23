@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { prisma } from "./index.js";
 import { queueConversationMessage } from "./conversation-service.js";
-import { dispatchPendingOutboxEvents, getOutboxEventByJobId, recoverStuckOutboxEvents } from "./outbox-service.js";
+import { calculateOutboxRetryDelay, dispatchPendingOutboxEvents, getOutboxEventByJobId, recoverStuckOutboxEvents, sanitizeOutboxError } from "./outbox-service.js";
 
 describe("transactional outbox", () => {
   let projectId: string;
@@ -92,11 +92,11 @@ describe("transactional outbox", () => {
 
     let stored = await getOutboxEventByJobId(result.agentSession.id);
     expect(stored?.status).toBe("FAILED");
-    expect(stored?.lastError).toMatch(/ECONNREFUSED/);
+    expect(stored?.lastErrorCode).toBe("REDIS_UNAVAILABLE");
 
     // Redis recovers: the same event is retried and this time succeeds.
     const recoveredPublish = vi.fn(async () => undefined);
-    const secondAttempt = await dispatchPendingOutboxEvents(recoveredPublish, 20, { jobId: result.agentSession.id });
+    const secondAttempt = await dispatchPendingOutboxEvents(recoveredPublish, 20, { jobId: result.agentSession.id }, { now: () => new Date(stored!.nextAttemptAt.getTime() + 1) });
     const recoveredResult = secondAttempt.find(item => item.jobId === result.agentSession.id);
     expect(recoveredResult?.status).toBe("published");
     expect(recoveredPublish).toHaveBeenCalledTimes(1);
@@ -117,7 +117,8 @@ describe("transactional outbox", () => {
     });
 
     await dispatchPendingOutboxEvents(failThenSucceed, 20, { jobId: result.agentSession.id });
-    await dispatchPendingOutboxEvents(failThenSucceed, 20, { jobId: result.agentSession.id });
+    const failed = await getOutboxEventByJobId(result.agentSession.id);
+    await dispatchPendingOutboxEvents(failThenSucceed, 20, { jobId: result.agentSession.id }, { now: () => new Date(failed!.nextAttemptAt.getTime() + 1) });
 
     expect(capturedJobIds).toEqual([result.agentSession.id, result.agentSession.id]);
   });
@@ -136,6 +137,7 @@ describe("transactional outbox", () => {
 
     const stored = await getOutboxEventByJobId(result.agentSession.id);
     expect(stored?.status).toBe("PUBLISHED");
+    expect(stored?.attempts).toBe(1);
   });
 
   it("recovers rows stuck in DISPATCHING after a dispatcher restart", async () => {
@@ -167,5 +169,66 @@ describe("transactional outbox", () => {
     await recoverStuckOutboxEvents(60_000);
     const stillDispatching = await getOutboxEventByJobId(result.agentSession.id);
     expect(stillDispatching?.status).toBe("DISPATCHING");
+  });
+
+  it("persists a future retry time and does not busy-loop while Redis is unavailable", async () => {
+    const conversation = await newConversation("Backoff scheduling");
+    const result = await queueTestMessage(conversation.id);
+    const now = new Date("2026-07-25T00:00:00.000Z");
+    const publish = vi.fn(async () => { throw new Error("ECONNREFUSED redis://user:password@localhost:6379/0"); });
+
+    await dispatchPendingOutboxEvents(publish, 20, { jobId: result.agentSession.id }, { now: () => now, jitter: () => 0.5 });
+    const failed = await getOutboxEventByJobId(result.agentSession.id);
+    expect(failed?.attempts).toBe(1);
+    expect(failed?.nextAttemptAt.getTime()).toBe(now.getTime() + 5_000);
+
+    await dispatchPendingOutboxEvents(publish, 20, { jobId: result.agentSession.id }, { now: () => new Date(now.getTime() + 4_999) });
+    expect(publish).toHaveBeenCalledTimes(1);
+
+    await dispatchPendingOutboxEvents(publish, 20, { jobId: result.agentSession.id }, { now: () => new Date(now.getTime() + 5_000), jitter: () => 0.5 });
+    const secondFailure = await getOutboxEventByJobId(result.agentSession.id);
+    expect(secondFailure?.attempts).toBe(2);
+    expect(secondFailure?.nextAttemptAt.getTime()).toBe(now.getTime() + 15_000);
+  });
+
+  it("uses bounded exponential backoff with bounded jitter", () => {
+    const policy = { baseDelayMs: 5_000, maxDelayMs: 15_000, maxAttempts: 10, jitterPercent: 0.1 };
+    expect(calculateOutboxRetryDelay(1, policy, () => 0)).toBe(4_500);
+    expect(calculateOutboxRetryDelay(2, policy, () => 1)).toBe(11_000);
+    expect(calculateOutboxRetryDelay(10, policy, () => 1)).toBe(15_000);
+  });
+
+  it("preserves retry timing and attempt count across dispatcher restart recovery", async () => {
+    const conversation = await newConversation("Retry restart persistence");
+    const result = await queueTestMessage(conversation.id);
+    const now = new Date("2026-07-25T01:00:00.000Z");
+    await dispatchPendingOutboxEvents(async () => { throw new Error("temporary"); }, 20, { jobId: result.agentSession.id }, { now: () => now, jitter: () => 0.5 });
+    const before = await getOutboxEventByJobId(result.agentSession.id);
+    await prisma.outboxEvent.update({ where: { jobId: result.agentSession.id }, data: { status: "DISPATCHING", updatedAt: new Date(now.getTime() - 120_000) } });
+    await recoverStuckOutboxEvents(60_000, now);
+    const after = await getOutboxEventByJobId(result.agentSession.id);
+    expect(after?.attempts).toBe(before?.attempts);
+    expect(after?.nextAttemptAt).toEqual(before?.nextAttemptAt);
+  });
+
+  it("moves an event to DEAD_LETTER at maximum attempts and never retries it", async () => {
+    const conversation = await newConversation("Dead letter");
+    const result = await queueTestMessage(conversation.id);
+    const now = new Date("2026-07-25T02:00:00.000Z");
+    const publish = vi.fn(async () => { throw new Error("permanent failure"); });
+    const dispatched = await dispatchPendingOutboxEvents(publish, 20, { jobId: result.agentSession.id }, { now: () => now, policy: { maxAttempts: 1 }, jitter: () => 0.5 });
+    expect(dispatched[0]?.status).toBe("dead-letter");
+    const deadLetter = await getOutboxEventByJobId(result.agentSession.id);
+    expect(deadLetter?.status).toBe("DEAD_LETTER");
+    await dispatchPendingOutboxEvents(publish, 20, { jobId: result.agentSession.id }, { now: () => new Date(now.getTime() + 86_400_000) });
+    expect(publish).toHaveBeenCalledTimes(1);
+  });
+
+  it("sanitizes connection strings, credentials, and filesystem paths before persisting errors", async () => {
+    const error = sanitizeOutboxError(new Error("redis://alice:secret@host:6379/0 token=abc123 C:\\Users\\alice\\token.txt /srv/private/.env"));
+    expect(error.message).not.toContain("secret");
+    expect(error.message).not.toContain("abc123");
+    expect(error.message).not.toContain("C:\\Users");
+    expect(error.message).not.toContain("/srv/private");
   });
 });
