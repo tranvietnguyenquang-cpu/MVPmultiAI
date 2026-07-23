@@ -63,6 +63,31 @@ export type TaskCapsuleContent = {
   handoff?: { fromProviderId: string; toProviderId: string; objective: string; unresolvedIssues: JsonValue; acceptedFindings: JsonValue };
 };
 
+export type ConversationModeValue = "ASK" | "IMPLEMENT" | "REVIEW" | "CONTINUE" | "VERIFY";
+export type ExecutionCapability = "READ_ONLY" | "WORKSPACE_WRITE";
+
+/**
+ * The authoritative provider/mode capability matrix. Only IMPLEMENT ever grants
+ * workspace-write, and only Codex supports it: Claude has no safe workspace-write
+ * sandbox in this build, so Claude+IMPLEMENT is absent (unsupported) rather than
+ * silently downgraded. Every other combination is read-only at the CLI layer.
+ */
+const PROVIDER_MODE_CAPABILITY: Record<"codex-cli" | "claude-cli", Partial<Record<ConversationModeValue, ExecutionCapability>>> = {
+  "codex-cli": { ASK: "READ_ONLY", REVIEW: "READ_ONLY", VERIFY: "READ_ONLY", CONTINUE: "READ_ONLY", IMPLEMENT: "WORKSPACE_WRITE" },
+  "claude-cli": { ASK: "READ_ONLY", REVIEW: "READ_ONLY", VERIFY: "READ_ONLY", CONTINUE: "READ_ONLY" }
+};
+
+/** Returns null for a provider/mode combination that must be rejected before queueing. */
+export function getProviderModeCapability(providerId: string, mode: string): ExecutionCapability | null {
+  return PROVIDER_MODE_CAPABILITY[providerId as "codex-cli" | "claude-cli"]?.[mode as ConversationModeValue] ?? null;
+}
+
+export function listProviderModeCapabilities(): Array<{ providerId: "codex-cli" | "claude-cli"; mode: ConversationModeValue; capability: ExecutionCapability | null }> {
+  const providers = ["codex-cli", "claude-cli"] as const;
+  const modes = ["ASK", "IMPLEMENT", "REVIEW", "CONTINUE", "VERIFY"] as const;
+  return providers.flatMap(providerId => modes.map(mode => ({ providerId, mode, capability: getProviderModeCapability(providerId, mode) })));
+}
+
 export const sessionJobSchema = z.object({ sessionId: z.string(), taskId: z.string(), capsuleId: z.string() });
 export type SessionJob = z.infer<typeof sessionJobSchema>;
 

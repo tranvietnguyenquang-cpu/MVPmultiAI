@@ -13,6 +13,7 @@ import {
   handoffChecksum,
   listConversationMessages,
   listProjectConversations,
+  queueConversationMessage,
 } from "./conversation-service.js";
 
 const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
@@ -224,5 +225,45 @@ describe("conversation service: database-backed operations", () => {
     expect(details?.routingDecisions).toHaveLength(1);
     expect(details?.handoffCapsules).toHaveLength(1);
     expect(details?.handoffCapsules[0]?.version).toBe(1);
+  });
+
+  it("rejects queueing Claude IMPLEMENT before creating any rows (unsupported provider/mode capability)", async () => {
+    const conversation = await createConversation(projectId, "Unsupported capability");
+
+    await expect(
+      queueConversationMessage({
+        conversationId: conversation.id,
+        projectId,
+        content: "please implement this",
+        mode: "IMPLEMENT",
+        selectedProviderId: "claude-cli",
+        reason: "test",
+        providerHealthSnapshot: {},
+        previousAssistantMessage: null,
+        idempotencyKey: randomUUID(),
+      }),
+    ).rejects.toThrow(/does not support IMPLEMENT/);
+
+    const messages = await prisma.conversationMessage.findMany({ where: { conversationId: conversation.id } });
+    expect(messages).toHaveLength(0);
+    const sessions = await prisma.agentSession.findMany({ where: { conversationId: conversation.id } });
+    expect(sessions).toHaveLength(0);
+  });
+
+  it("allows queueing Codex IMPLEMENT (the only supported workspace-write combination)", async () => {
+    const conversation = await createConversation(projectId, "Codex implement allowed");
+
+    const result = await queueConversationMessage({
+      conversationId: conversation.id,
+      projectId,
+      content: "please implement this",
+      mode: "IMPLEMENT",
+      selectedProviderId: "codex-cli",
+      reason: "test",
+      providerHealthSnapshot: {},
+      previousAssistantMessage: null,
+      idempotencyKey: randomUUID(),
+    });
+    expect(result.duplicate).toBe(false);
   });
 });

@@ -4,7 +4,7 @@ import { createTaskCapsule } from "@project-relay/context-engine";
 import { redactSecrets } from "@project-relay/execution";
 import type { ProviderRegistry, ProviderRole } from "@project-relay/providers";
 import { providerRegistry as defaultRegistry } from "@project-relay/providers";
-import { conversationMessageJobSchema, type ConversationMessageJob, type JsonValue, type TaskCapsuleContent } from "@project-relay/shared";
+import { conversationMessageJobSchema, getProviderModeCapability, type ConversationMessageJob, type JsonValue, type TaskCapsuleContent } from "@project-relay/shared";
 
 const MAX_ASSISTANT_MESSAGE_BYTES = 65_536;
 const DEFAULT_TIMEOUT_MS = Number(process.env.PROJECT_RELAY_CONVERSATION_TIMEOUT_MS ?? 120_000);
@@ -117,6 +117,7 @@ function validateExecutionRelationships(input: {
     if (handoffCapsule.conversationId !== conversation.id) return "Cross-wired execution: the handoff capsule does not belong to this conversation.";
     if (handoffCapsule.toProviderId !== session.providerId) return "Cross-wired execution: the handoff capsule's target provider does not match the agent session's provider.";
   }
+  if (!getProviderModeCapability(session.providerId, userMessage.mode)) return `Unsupported execution: ${session.providerId} does not support ${userMessage.mode} mode.`;
   return null;
 }
 
@@ -177,17 +178,22 @@ export async function processConversationMessage(job: Job<ConversationMessageJob
 
     await prisma.agentSession.update({ where: { id: session.id }, data: { state: "RUNNING" } });
     const role = roleForMode(userMessage.mode);
+    const capability = getProviderModeCapability(session.providerId, userMessage.mode);
+    if (!capability) throw new Error(`Unsupported execution: ${session.providerId} does not support ${userMessage.mode} mode.`);
     const providerAgentSession = await provider.createSession({
       workspace: session.project.repositoryPath,
       taskId: session.taskId,
+      capability,
       ...(role ? { role } : {})
     });
     await event(session.id, "state", `Running ${status.version ?? provider.name}.`);
 
+    // Only "stdout" events become the persisted assistant answer; state/usage/stderr
+    // events are diagnostic-only and must never leak into the conversation transcript.
     let providerOutput = "";
     const consume = (async () => {
       for await (const item of provider.streamEvents(providerAgentSession.id)) {
-        providerOutput += item.message;
+        if (item.type === "stdout") providerOutput += item.message;
         await event(session.id, item.type, item.message, item.type === "stdout" || item.type === "stderr" ? item.type : undefined);
       }
     })();

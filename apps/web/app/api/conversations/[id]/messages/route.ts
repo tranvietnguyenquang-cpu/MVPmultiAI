@@ -8,7 +8,7 @@ import {
   listConversationMessages,
   queueConversationMessage
 } from "@project-relay/database";
-import { createConversationMessageSchema } from "@project-relay/shared";
+import { createConversationMessageSchema, getProviderModeCapability } from "@project-relay/shared";
 import { classifyRequest } from "../../../../../lib/csrf";
 import { requireLocalSession } from "../../../../../lib/local-auth";
 import { findAccessibleProject } from "../../../../../lib/project-access";
@@ -43,30 +43,36 @@ function describeUnhealthy(providerId: ConversationProviderId, entry: ProviderHe
   return `${providerId} is not currently available.`;
 }
 
+function isCapable(providerId: ConversationProviderId, mode: string): boolean {
+  return getProviderModeCapability(providerId, mode) !== null;
+}
+
 function selectProvider(
   requested: ConversationProviderId | "auto",
   currentProviderId: ConversationProviderId | null,
-  health: Record<ConversationProviderId, ProviderHealthEntry>
+  health: Record<ConversationProviderId, ProviderHealthEntry>,
+  mode: string
 ): { providerId: ConversationProviderId; reason: string } | { error: string } {
   if (requested !== "auto") {
+    if (!isCapable(requested, mode)) return { error: `${requested} does not support ${mode} execution.` };
     if (isHealthy(health[requested])) {
       return { providerId: requested, reason: `Explicit selection: ${requested} is installed, authenticated, and available.` };
     }
     return { error: describeUnhealthy(requested, health[requested]) };
   }
-  if (currentProviderId && isHealthy(health[currentProviderId])) {
+  if (currentProviderId && isCapable(currentProviderId, mode) && isHealthy(health[currentProviderId])) {
     return { providerId: currentProviderId, reason: `Auto: continuing with the current healthy provider ${currentProviderId}.` };
   }
-  const fallback = CONVERSATION_PROVIDER_ORDER.find(id => isHealthy(health[id]));
+  const fallback = CONVERSATION_PROVIDER_ORDER.find(id => isCapable(id, mode) && isHealthy(health[id]));
   if (fallback) {
     return {
       providerId: fallback,
       reason: currentProviderId
-        ? `Auto: ${currentProviderId} is unavailable; falling back to the healthy provider ${fallback}.`
+        ? `Auto: ${currentProviderId} is unavailable or incapable of ${mode}; falling back to the healthy provider ${fallback}.`
         : `Auto: selecting the first healthy configured provider ${fallback}.`
     };
   }
-  return { error: "No configured provider is currently installed, authenticated, and available." };
+  return { error: `No configured provider capable of ${mode} execution is currently installed, authenticated, and available.` };
 }
 
 export async function POST(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
@@ -99,7 +105,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
 
   const health = (await getProviderHealthSnapshot([...CONVERSATION_PROVIDER_ORDER])) as Record<ConversationProviderId, ProviderHealthEntry>;
 
-  const selection = selectProvider(parsed.data.provider, currentProviderId, health);
+  const selection = selectProvider(parsed.data.provider, currentProviderId, health, parsed.data.mode);
   if ("error" in selection) return NextResponse.json({ error: selection.error }, { status: 409 });
 
   try {

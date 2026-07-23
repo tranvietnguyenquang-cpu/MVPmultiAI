@@ -7,7 +7,7 @@ import type { ConversationMessageJob } from "@project-relay/shared";
 import { processConversationMessage } from "./conversation-worker.js";
 
 function makeFakeProvider(id: "codex-cli" | "claude-cli") {
-  const createSession = vi.fn(async () => ({ id: randomUUID(), providerId: id, workspace: "/tmp/x", taskId: "t", role: "IMPLEMENTER" as const }));
+  const createSession = vi.fn(async () => ({ id: randomUUID(), providerId: id, workspace: "/tmp/x", taskId: "t", role: "IMPLEMENTER" as const, capability: "READ_ONLY" as const }));
   const startSession = vi.fn(async () => undefined);
   const provider: CodingProvider = {
     id,
@@ -86,13 +86,13 @@ describe("conversation worker relationship validation", () => {
     return prisma.conversation.create({ data: { projectId: pid, title } });
   }
 
-  async function expectRejectedWithoutInvokingProvider(payload: ConversationMessageJob, provider: ReturnType<typeof makeFakeProvider>) {
-    await expect(processConversationMessage({ data: payload } as unknown as Job<ConversationMessageJob>, { registry: makeRegistry({ "codex-cli": provider.provider, "claude-cli": provider.provider }) })).rejects.toThrow(/cross-wired/i);
+  async function expectRejectedWithoutInvokingProvider(payload: ConversationMessageJob, provider: ReturnType<typeof makeFakeProvider>, reason: RegExp = /cross-wired/i) {
+    await expect(processConversationMessage({ data: payload } as unknown as Job<ConversationMessageJob>, { registry: makeRegistry({ "codex-cli": provider.provider, "claude-cli": provider.provider }) })).rejects.toThrow(reason);
     expect(provider.createSession).not.toHaveBeenCalled();
     expect(provider.startSession).not.toHaveBeenCalled();
     const session = await prisma.agentSession.findUniqueOrThrow({ where: { id: payload.sessionId } });
     expect(session.state).toBe("FAILED");
-    expect(session.error).toMatch(/cross-wired/i);
+    expect(session.error).toMatch(reason);
   }
 
   it("rejects a payload whose conversationId does not match the agent session's own conversation", async () => {
@@ -173,6 +173,17 @@ describe("conversation worker relationship validation", () => {
     // Confirm the other project's own conversation/messages were never touched by the rejected run.
     const otherMessages = await prisma.conversationMessage.findMany({ where: { conversationId: otherConversation.id } });
     expect(otherMessages.every(message => message.role !== "ASSISTANT")).toBe(true);
+  });
+
+  it("rejects a stale payload whose mode is unsupported for the recorded provider (Claude IMPLEMENT) without invoking the provider", async () => {
+    const conversation = await newConversation(projectId, "Unsupported capability");
+    const fake = makeFakeProvider("claude-cli");
+    const { payload } = await queueTestMessage({ conversationId: conversation.id, projectId, selectedProviderId: "claude-cli" });
+    // queueConversationMessage itself refuses to create a Claude+IMPLEMENT execution; simulate a
+    // stale/corrupted payload that reaches the worker with an unsupported mode anyway (e.g. a
+    // message row mutated after routing, or a payload replayed from an older, looser producer).
+    await prisma.conversationMessage.update({ where: { id: payload.messageId }, data: { mode: "IMPLEMENT" } });
+    await expectRejectedWithoutInvokingProvider(payload, fake, /unsupported execution/i);
   });
 
   it("enforces at most one assistant message per AgentSession at the database level", async () => {

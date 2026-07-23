@@ -10,7 +10,7 @@ type FakeProviderOverrides = Partial<{
   available: boolean;
   authentication: ProviderProbe["authentication"];
   externalId: string;
-  events: Array<{ type: "stdout" | "stderr"; message: string }>;
+  events: Array<{ type: "state" | "stdout" | "stderr" | "usage"; message: string }>;
   startSession: CodingProvider["startSession"];
   streamEvents: CodingProvider["streamEvents"];
 }>;
@@ -18,12 +18,13 @@ type FakeProviderOverrides = Partial<{
 function makeFakeProvider(id: "codex-cli" | "claude-cli", overrides: FakeProviderOverrides = {}) {
   const events = overrides.events ?? [{ type: "stdout" as const, message: "ok" }];
   const capturedCapsules: TaskCapsuleContent[] = [];
-  const createSession = vi.fn(async (input: { workspace: string; taskId: string; role?: string; resumeExternalId?: string }): Promise<ProviderAgentSession> => ({
+  const createSession = vi.fn(async (input: { workspace: string; taskId: string; capability: ProviderAgentSession["capability"]; role?: string; resumeExternalId?: string }): Promise<ProviderAgentSession> => ({
     id: randomUUID(),
     providerId: id,
     workspace: input.workspace,
     taskId: input.taskId,
     role: (input.role as ProviderAgentSession["role"]) ?? "IMPLEMENTER",
+    capability: input.capability,
     ...(overrides.externalId ? { externalId: overrides.externalId } : {})
   }));
   const defaultStartSession: CodingProvider["startSession"] = async (_session, capsule) => { capturedCapsules.push(capsule); };
@@ -303,6 +304,26 @@ describe("conversation worker execution", () => {
 
     const assistant = await prisma.conversationMessage.findFirstOrThrow({ where: { conversationId: conversation.id, role: "ASSISTANT" } });
     expect(assistant.content.length).toBeLessThanOrEqual(65_536);
+  });
+
+  it("persists only stdout-classified events as the assistant answer, never state/usage/stderr noise", async () => {
+    const conversation = await newConversation("Assistant text isolation");
+    const fake = makeFakeProvider("codex-cli", {
+      events: [
+        { type: "state", message: "Session configured." },
+        { type: "usage", message: JSON.stringify({ inputTokens: 10 }) },
+        { type: "stdout", message: "the real assistant answer" },
+        { type: "stderr", message: "some diagnostic noise" }
+      ]
+    });
+    const { payload } = await queueTestMessage({ conversationId: conversation.id, projectId, content: "hello", selectedProviderId: "codex-cli" });
+
+    await processConversationMessage({ data: payload } as unknown as Job<ConversationMessageJob>, { registry: makeRegistry({ "codex-cli": fake.provider }) });
+
+    const assistant = await prisma.conversationMessage.findFirstOrThrow({ where: { conversationId: conversation.id, role: "ASSISTANT" } });
+    expect(assistant.content).toBe("the real assistant answer");
+    expect(assistant.content).not.toContain("Session configured");
+    expect(assistant.content).not.toContain("diagnostic noise");
   });
 
   it("redacts a secret split across stream chunks", async () => {

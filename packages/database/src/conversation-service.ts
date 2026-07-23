@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { getProviderModeCapability } from "@project-relay/shared";
 import { Prisma, prisma } from "./index.js";
 import { createOutboxEventWithClient } from "./outbox-service.js";
 const HANDOFF_MAX_BYTES=32_768;
@@ -51,6 +52,7 @@ export type QueueConversationMessageInput={
 };
 
 export async function queueConversationMessage(input:QueueConversationMessageInput){
+  if(!getProviderModeCapability(input.selectedProviderId,input.mode))throw new Error(`${input.selectedProviderId} does not support ${input.mode} execution.`);
   return prisma.$transaction(async tx=>{
     // Acquire an exclusive row lock on the conversation before doing anything else. This
     // serializes every concurrent submission against the same conversation (same-provider
