@@ -12,8 +12,14 @@ export function e2eWorkspace(): string {
   return workspace;
 }
 
+export function e2eRunId(): string {
+  const manifest = path.join(__dirname, ".e2e-workspace.json");
+  const { runId } = JSON.parse(readFileSync(manifest, "utf8")) as { runId: string };
+  return runId;
+}
+
 export async function createProject(name = `e2e-${randomUUID()}`) {
-  return prisma.project.create({ data: { name, repositoryPath: e2eWorkspace(), allowedCommands: [], permittedPaths: [] } });
+  return prisma.project.create({ data: { name, repositoryPath: e2eWorkspace(), allowedCommands: [], permittedPaths: [], isVerification: true, verificationRunId: e2eRunId() } });
 }
 
 export async function createConversation(projectId: string, title: string) {

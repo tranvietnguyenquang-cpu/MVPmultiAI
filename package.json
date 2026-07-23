@@ -20,6 +20,7 @@
     "test:browser": "playwright test",
     "test:all": "npm run typecheck && npm run lint && npm run test:unit && npm run test:integration && npm run test:e2e && npm run build",
     "verify:mvp": "tsx scripts/verify-mvp.ts",
+    "cleanup:verification": "tsx scripts/cleanup-verification.ts",
     "smoke:codex": "tsx scripts/smoke-provider.ts codex-cli",
     "smoke:claude": "tsx scripts/smoke-provider.ts claude-cli",
     "smoke:session:codex": "tsx scripts/smoke-provider-session.ts codex-cli",

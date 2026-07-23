@@ -151,6 +151,9 @@ model Project {
   defaultProvider   String @default("codex-cli")
   allowedCommands   Json
   permittedPaths    Json
+  /** Set only by the verification harness; never inferred from browser input. */
+  verificationRunId String?
+  isVerification    Boolean @default(false)
   archivedAt        DateTime?
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
@@ -162,6 +165,7 @@ model Project {
   auditEvents       AuditEvent[]
   approvals         Approval[]
   conversations     Conversation[]
+  @@index([isVerification, verificationRunId])
 }
 
 model Conversation {

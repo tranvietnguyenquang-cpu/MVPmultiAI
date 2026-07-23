@@ -7,3 +7,4 @@ export * from "@prisma/client";
 export * from "./conversation-service.js";
 export * from "./outbox-service.js";
 export * from "./auth-service.js";
+export * from "./verification-cleanup.js";

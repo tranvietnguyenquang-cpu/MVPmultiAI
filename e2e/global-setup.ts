@@ -1,4 +1,5 @@
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -51,7 +52,7 @@ export default async function globalSetup(): Promise<void> {
   writeFileSync(path.join(workspace, "README.md"), "Disposable git workspace for Playwright browser verification.\n");
   await run("git", ["add", "-A"], workspace);
   await run("git", ["commit", "-m", "init"], workspace);
-  writeFileSync(WORKSPACE_MANIFEST, JSON.stringify({ workspace }));
+  writeFileSync(WORKSPACE_MANIFEST, JSON.stringify({ workspace, runId: `playwright-${randomUUID()}` }));
 
   // Both providers healthy so the composer's "auto"/explicit routing can queue messages
   // without depending on whatever CLIs happen to be installed on the host.
