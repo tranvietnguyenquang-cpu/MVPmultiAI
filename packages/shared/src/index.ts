@@ -25,7 +25,8 @@ export const createConversationMessageSchema = z.object({
   content: z.string().trim().min(1).max(20_000),
   provider: z.enum(["codex-cli", "claude-cli", "auto"]),
   mode: z.enum(["ASK", "IMPLEMENT", "REVIEW", "CONTINUE", "VERIFY"]),
-  taskId: z.string().min(1).optional()
+  taskId: z.string().min(1).optional(),
+  idempotencyKey: z.string().trim().min(1).max(200).optional()
 });
 
 export const acceptanceCriterionInputSchema = z.object({

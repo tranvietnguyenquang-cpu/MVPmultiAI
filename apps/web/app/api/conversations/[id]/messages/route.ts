@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
 import {
   findProjectTask,
@@ -112,11 +113,13 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       ...(parsed.data.provider !== "auto" ? { requestedProviderId: parsed.data.provider } : {}),
       reason: selection.reason,
       providerHealthSnapshot: health,
-      previousAssistantMessage
+      previousAssistantMessage,
+      idempotencyKey: parsed.data.idempotencyKey ?? randomUUID()
     });
 
     return NextResponse.json(
       {
+        duplicate: result.duplicate,
         userMessage: result.userMessage,
         selectedProvider: selection.providerId,
         routingDecision: result.routingDecision,

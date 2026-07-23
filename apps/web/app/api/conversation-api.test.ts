@@ -152,7 +152,6 @@ describe("conversation CRUD API", () => {
       const second = await createAssistantMessage({
         conversationId: conversation.id,
         providerId: "codex-cli",
-        providerSessionId: "unused",
         mode: "ASK",
         content: "hi",
       });

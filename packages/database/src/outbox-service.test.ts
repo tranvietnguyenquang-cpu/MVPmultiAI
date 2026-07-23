@@ -33,7 +33,8 @@ describe("transactional outbox", () => {
       selectedProviderId: "codex-cli",
       reason: "test",
       providerHealthSnapshot: {},
-      previousAssistantMessage: null
+      previousAssistantMessage: null,
+      idempotencyKey: randomUUID()
     });
   }
 
@@ -60,7 +61,8 @@ describe("transactional outbox", () => {
         selectedProviderId: "codex-cli",
         reason: "test",
         providerHealthSnapshot: {},
-        previousAssistantMessage: null
+        previousAssistantMessage: null,
+        idempotencyKey: randomUUID()
       })
     ).rejects.toThrow();
     const after = await prisma.outboxEvent.count();

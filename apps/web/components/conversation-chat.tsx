@@ -132,10 +132,11 @@ export function ConversationChat(props: {
     setSubmitting(true);
     setComposerError("");
     try {
+      const idempotencyKey = crypto.randomUUID();
       const response = await csrfFetch(`/api/conversations/${conversationId}/messages`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ content: trimmed, provider, mode })
+        body: JSON.stringify({ content: trimmed, provider, mode, idempotencyKey })
       });
       const data = await response.json() as { queuedExecution?: { agentSessionId: string }; error?: string };
       if (!response.ok) throw new Error(data.error ?? "Could not send message.");

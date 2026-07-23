@@ -168,12 +168,15 @@ model Conversation {
   status            ConversationStatus @default(ACTIVE)
   activeProviderId  String?
   currentCheckpointId String?
+  sequence          Int @default(0)
+  handoffSequence   Int @default(0)
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
   messages          ConversationMessage[]
   providerSessions  ProviderSession[]
   handoffCapsules   HandoffCapsule[]
   routingDecisions  RoutingDecision[]
+  agentSessions     AgentSession[]
   @@index([projectId,updatedAt])
 }
 model ConversationMessage {
@@ -183,15 +186,23 @@ model ConversationMessage {
   role ConversationRole
   providerId String?
   providerSessionId String?
+  providerSession ProviderSession? @relation("MessageProviderSession",fields:[providerSessionId],references:[id],onDelete:SetNull)
   mode ConversationMode
   content String
   status ConversationMessageStatus @default(QUEUED)
+  idempotencyKey String?
   handoffCapsuleId String?
+  handoffCapsule HandoffCapsule? @relation(fields:[handoffCapsuleId],references:[id],onDelete:SetNull)
   taskId String?
-  agentSessionId String?
+  task Task? @relation(fields:[taskId],references:[id],onDelete:Restrict)
+  agentSessionId String? @unique
+  agentSession AgentSession? @relation("AssistantMessage",fields:[agentSessionId],references:[id],onDelete:SetNull)
+  triggeredSession AgentSession? @relation("TriggerMessage")
+  lastMessageOfSession ProviderSession? @relation("ProviderSessionLastMessage")
+  routingDecision RoutingDecision?
   createdAt DateTime @default(now())
   @@index([conversationId,createdAt])
-  @@index([agentSessionId])
+  @@unique([conversationId,idempotencyKey])
 }
 model ProviderSession {
   id String @id @default(cuid())
@@ -202,7 +213,10 @@ model ProviderSession {
   status ProviderSessionStatus @default(QUEUED)
   startedAt DateTime?
   endedAt DateTime?
-  lastMessageId String?
+  lastMessageId String? @unique
+  lastMessage ConversationMessage? @relation("ProviderSessionLastMessage",fields:[lastMessageId],references:[id],onDelete:SetNull)
+  messages ConversationMessage[] @relation("MessageProviderSession")
+  agentSessions AgentSession[]
   @@index([conversationId,providerId,startedAt])
 }
 model HandoffCapsule {
@@ -222,6 +236,7 @@ model HandoffCapsule {
   acceptedFindings Json
   sourceMessageRange Json
   checksum String
+  messages ConversationMessage[]
   createdAt DateTime @default(now())
   @@unique([conversationId,version])
 }
@@ -229,6 +244,8 @@ model RoutingDecision {
   id String @id @default(cuid())
   conversationId String
   conversation Conversation @relation(fields:[conversationId],references:[id],onDelete:Cascade)
+  userMessageId String? @unique
+  userMessage ConversationMessage? @relation(fields:[userMessageId],references:[id],onDelete:Cascade)
   requestedProviderId String?
   selectedProviderId String
   reason String
@@ -297,6 +314,7 @@ model Task {
   evidence           Evidence[]
   memoryUpdates      MemoryUpdate[]
   reviewFindings     ReviewFinding[]
+  conversationMessages ConversationMessage[]
 }
 
 model AcceptanceCriterion {
@@ -357,7 +375,12 @@ model AgentSession {
   purpose     String @default("IMPLEMENTATION")
   readOnly    Boolean @default(false)
   providerSessionId String?
+  providerSession ProviderSession? @relation(fields:[providerSessionId],references:[id],onDelete:SetNull)
   conversationId String?
+  conversation Conversation? @relation(fields:[conversationId],references:[id],onDelete:SetNull)
+  userMessageId String? @unique
+  userMessage ConversationMessage? @relation("TriggerMessage",fields:[userMessageId],references:[id],onDelete:SetNull)
+  assistantMessage ConversationMessage? @relation("AssistantMessage")
   createdAt   DateTime @default(now())
   events      AgentEvent[]
   evidence    Evidence[]

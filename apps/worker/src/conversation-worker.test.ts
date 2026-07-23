@@ -66,6 +66,8 @@ function makeRegistry(providers: Record<string, CodingProvider>) {
   return { get: (id: string) => { const provider = providers[id]; if (!provider) throw new Error(`Unknown provider '${id}'.`); return provider; } };
 }
 
+type FreshQueueResult = Extract<Awaited<ReturnType<typeof queueConversationMessage>>, { duplicate: false }>;
+
 async function queueTestMessage(input: {
   conversationId: string;
   projectId: string;
@@ -73,7 +75,7 @@ async function queueTestMessage(input: {
   mode?: "ASK" | "IMPLEMENT" | "REVIEW" | "CONTINUE" | "VERIFY";
   selectedProviderId: "codex-cli" | "claude-cli";
   previousAssistantMessage?: { id: string; providerId: string | null } | null;
-}) {
+}): Promise<{ result: FreshQueueResult; payload: ConversationMessageJob; job: Job<ConversationMessageJob> }> {
   const result = await queueConversationMessage({
     conversationId: input.conversationId,
     projectId: input.projectId,
@@ -82,8 +84,10 @@ async function queueTestMessage(input: {
     selectedProviderId: input.selectedProviderId,
     reason: "test routing",
     providerHealthSnapshot: {},
-    previousAssistantMessage: input.previousAssistantMessage ?? null
+    previousAssistantMessage: input.previousAssistantMessage ?? null,
+    idempotencyKey: randomUUID()
   });
+  if (result.duplicate) throw new Error("Expected a fresh (non-duplicate) queue result.");
   const payload: ConversationMessageJob = {
     sessionId: result.agentSession.id,
     taskId: result.taskId,
@@ -173,7 +177,7 @@ describe("conversation worker execution", () => {
 
   it("includes a compact handoff summary in the prompt when the provider switches", async () => {
     const conversation = await newConversation("Prompt includes handoff");
-    const priorAssistant = await prisma.conversationMessage.create({ data: { conversationId: conversation.id, role: "ASSISTANT", providerId: "codex-cli", providerSessionId: "unused", mode: "ASK", content: "codex reply", status: "COMPLETED" } });
+    const priorAssistant = await prisma.conversationMessage.create({ data: { conversationId: conversation.id, role: "ASSISTANT", providerId: "codex-cli", mode: "ASK", content: "codex reply", status: "COMPLETED" } });
     const claude = makeFakeProvider("claude-cli");
     const { payload } = await queueTestMessage({
       conversationId: conversation.id,

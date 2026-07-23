@@ -115,7 +115,7 @@ describe("conversation message orchestration API", () => {
   describe("auto routing", () => {
     it("prefers the current healthy provider", async () => {
       const conversation = await createConversation(projectId, "Auto prefers current");
-      await createAssistantMessage({ conversationId: conversation.id, providerId: "claude-cli", providerSessionId: "unused", mode: "ASK", content: "prior reply" });
+      await createAssistantMessage({ conversationId: conversation.id, providerId: "claude-cli", mode: "ASK", content: "prior reply" });
       const response = await postJson(conversation.id, { content: "hello", provider: "auto", mode: "ASK" });
       expect(response.status).toBe(202);
       const body = await response.json();
@@ -125,7 +125,7 @@ describe("conversation message orchestration API", () => {
 
     it("falls back to the other healthy provider when the current one is unhealthy", async () => {
       const conversation = await createConversation(projectId, "Auto falls back");
-      await createAssistantMessage({ conversationId: conversation.id, providerId: "codex-cli", providerSessionId: "unused", mode: "ASK", content: "prior reply" });
+      await createAssistantMessage({ conversationId: conversation.id, providerId: "codex-cli", mode: "ASK", content: "prior reply" });
       await setProviderHealth("codex-cli", { available: false });
       const response = await postJson(conversation.id, { content: "hello", provider: "auto", mode: "ASK" });
       expect(response.status).toBe(202);
@@ -159,7 +159,7 @@ describe("conversation message orchestration API", () => {
 
     it("creates exactly one handoff capsule when switching from Codex to Claude", async () => {
       const conversation = await createConversation(projectId, "Codex to Claude");
-      await createAssistantMessage({ conversationId: conversation.id, providerId: "codex-cli", providerSessionId: "unused", mode: "ASK", content: "codex reply" });
+      await createAssistantMessage({ conversationId: conversation.id, providerId: "codex-cli", mode: "ASK", content: "codex reply" });
       const response = await postJson(conversation.id, { content: "switch please", provider: "claude-cli", mode: "ASK" });
       expect(response.status).toBe(202);
       const body = await response.json();
@@ -173,7 +173,7 @@ describe("conversation message orchestration API", () => {
 
     it("creates exactly one handoff capsule when switching from Claude to Codex", async () => {
       const conversation = await createConversation(projectId, "Claude to Codex");
-      await createAssistantMessage({ conversationId: conversation.id, providerId: "claude-cli", providerSessionId: "unused", mode: "ASK", content: "claude reply" });
+      await createAssistantMessage({ conversationId: conversation.id, providerId: "claude-cli", mode: "ASK", content: "claude reply" });
       const response = await postJson(conversation.id, { content: "switch please", provider: "codex-cli", mode: "ASK" });
       expect(response.status).toBe(202);
       const body = await response.json();
@@ -186,7 +186,7 @@ describe("conversation message orchestration API", () => {
 
     it("does not create another handoff when continuing with the same provider", async () => {
       const conversation = await createConversation(projectId, "Same provider continuation");
-      await createAssistantMessage({ conversationId: conversation.id, providerId: "codex-cli", providerSessionId: "unused", mode: "ASK", content: "codex reply" });
+      await createAssistantMessage({ conversationId: conversation.id, providerId: "codex-cli", mode: "ASK", content: "codex reply" });
       const response = await postJson(conversation.id, { content: "keep going", provider: "codex-cli", mode: "ASK" });
       expect(response.status).toBe(202);
       const body = await response.json();
@@ -201,7 +201,7 @@ describe("conversation message orchestration API", () => {
 
     it("bounds the handoff payload even with maximal message content", async () => {
       const conversation = await createConversation(projectId, "Bounded handoff");
-      await createAssistantMessage({ conversationId: conversation.id, providerId: "codex-cli", providerSessionId: "unused", mode: "ASK", content: "codex reply" });
+      await createAssistantMessage({ conversationId: conversation.id, providerId: "codex-cli", mode: "ASK", content: "codex reply" });
       const response = await postJson(conversation.id, { content: "x".repeat(20_000), provider: "claude-cli", mode: "ASK" });
       expect(response.status).toBe(202);
       const body = await response.json();
@@ -212,9 +212,9 @@ describe("conversation message orchestration API", () => {
 
     it("excludes unrelated old messages from the handoff source range", async () => {
       const conversation = await createConversation(projectId, "Excludes old history");
-      const oldAssistant = await createAssistantMessage({ conversationId: conversation.id, providerId: "codex-cli", providerSessionId: "unused", mode: "ASK", content: "old codex reply" });
+      const oldAssistant = await createAssistantMessage({ conversationId: conversation.id, providerId: "codex-cli", mode: "ASK", content: "old codex reply" });
       await new Promise(resolve => setTimeout(resolve, 5));
-      await createAssistantMessage({ conversationId: conversation.id, providerId: "codex-cli", providerSessionId: "unused", mode: "ASK", content: "recent codex reply" });
+      await createAssistantMessage({ conversationId: conversation.id, providerId: "codex-cli", mode: "ASK", content: "recent codex reply" });
       const recentAssistant = await prisma.conversationMessage.findFirst({ where: { conversationId: conversation.id, role: "ASSISTANT" }, orderBy: [{ createdAt: "desc" }, { id: "desc" }] });
 
       const response = await postJson(conversation.id, { content: "switch to claude", provider: "claude-cli", mode: "ASK" });

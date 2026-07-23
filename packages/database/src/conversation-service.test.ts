@@ -74,7 +74,6 @@ describe("conversation service: database-backed operations", () => {
     const second = await createAssistantMessage({
       conversationId: conversation.id,
       providerId: "codex-cli",
-      providerSessionId: "unused-session-id",
       mode: "ASK",
       content: "first assistant reply",
     });
@@ -199,7 +198,6 @@ describe("conversation service: database-backed operations", () => {
     await createAssistantMessage({
       conversationId: conversation.id,
       providerId: "codex-cli",
-      providerSessionId: "unused-session-id",
       mode: "ASK",
       content: "hi there",
     });
