@@ -40,8 +40,15 @@ describe("isLoopbackRequestHeaders", () => {
     expect(isLoopbackRequestHeaders({ host: "203.0.113.5:3300", forwardedFor: null, forwardedHost: null })).toBe(false);
   });
 
-  it("rejects any request carrying proxy-forwarded headers even if Host looks loopback", () => {
+  it("rejects forwarded headers that reveal a real, non-loopback remote client or host", () => {
     expect(isLoopbackRequestHeaders({ host: "127.0.0.1:3300", forwardedFor: "203.0.113.5", forwardedHost: null })).toBe(false);
     expect(isLoopbackRequestHeaders({ host: "127.0.0.1:3300", forwardedFor: null, forwardedHost: "example.com" })).toBe(false);
+    // The leftmost address in a comma-separated X-Forwarded-For chain is the original client.
+    expect(isLoopbackRequestHeaders({ host: "127.0.0.1:3300", forwardedFor: "203.0.113.5, 127.0.0.1", forwardedHost: null })).toBe(false);
+  });
+
+  it("accepts self-consistent loopback forwarded headers (Next.js's own server injects these on every request, even a direct local connection)", () => {
+    expect(isLoopbackRequestHeaders({ host: "127.0.0.1:3300", forwardedFor: "127.0.0.1", forwardedHost: "127.0.0.1:3300" })).toBe(true);
+    expect(isLoopbackRequestHeaders({ host: "localhost:3300", forwardedFor: "::1", forwardedHost: "localhost:3300" })).toBe(true);
   });
 });

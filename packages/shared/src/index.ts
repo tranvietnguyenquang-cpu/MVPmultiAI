@@ -126,11 +126,27 @@ export function assertLoopbackHost(host: string, context: string): void {
   }
 }
 
+/**
+ * Next.js's own server injects x-forwarded-for/x-forwarded-host on every request that
+ * reaches middleware - including a direct loopback connection with no real reverse proxy
+ * involved - so their mere presence can't be treated as "this came through a proxy, reject
+ * it". Instead, whenever present they must themselves resolve to loopback: a genuine
+ * reverse-proxied exposure to a remote client reveals a non-loopback address in one of
+ * these headers, which this still rejects.
+ */
 export function isLoopbackRequestHeaders(input: { host: string | null; forwardedFor: string | null; forwardedHost: string | null }): boolean {
-  if (input.forwardedFor || input.forwardedHost) return false;
   if (!input.host) return false;
   const hostname = input.host.split(":")[0] ?? "";
-  return isLoopbackHost(hostname);
+  if (!isLoopbackHost(hostname)) return false;
+  if (input.forwardedFor) {
+    const originClient = input.forwardedFor.split(",")[0]?.trim() ?? "";
+    if (!isLoopbackHost(originClient)) return false;
+  }
+  if (input.forwardedHost) {
+    const forwardedHostname = input.forwardedHost.split(":")[0] ?? "";
+    if (!isLoopbackHost(forwardedHostname)) return false;
+  }
+  return true;
 }
 
 export type LockedDecisionRule = { id: string; forbiddenPaths: string[]; requiredPatterns: string[] };

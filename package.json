@@ -17,6 +17,7 @@
     "test:unit": "vitest run packages",
     "test:integration": "vitest run apps",
     "test:e2e": "vitest run apps --testNamePattern=e2e",
+    "test:browser": "playwright test",
     "test:all": "npm run typecheck && npm run lint && npm run test:unit && npm run test:integration && npm run test:e2e && npm run build",
     "verify:mvp": "tsx scripts/verify-mvp.ts",
     "smoke:codex": "tsx scripts/smoke-provider.ts codex-cli",
@@ -40,6 +41,7 @@
   },
   "devDependencies": {
     "@eslint/js": "9.34.0",
+    "@playwright/test": "^1.61.1",
     "@types/node": "22.17.2",
     "cross-spawn": "7.0.6",
     "eslint": "9.34.0",
