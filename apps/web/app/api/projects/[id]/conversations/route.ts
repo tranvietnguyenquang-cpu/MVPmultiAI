@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createConversation, listProjectConversations } from "@project-relay/database";
 import { createConversationSchema } from "@project-relay/shared";
 import { classifyRequest } from "../../../../../lib/csrf";
+import { requireLocalSession } from "../../../../../lib/local-auth";
 import { findAccessibleProject } from "../../../../../lib/project-access";
 
 export async function GET(_: NextRequest, { params }: { params: Promise<{ id: string }> }) {
@@ -15,6 +16,9 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   const gate = classifyRequest(request);
   if (gate === "cross-origin") return NextResponse.json({ error: "Cross-origin requests are not permitted." }, { status: 403 });
   if (gate === "unauthenticated") return NextResponse.json({ error: "Missing or invalid CSRF token." }, { status: 401 });
+
+  const session = await requireLocalSession(request);
+  if (!session) return NextResponse.json({ error: "Local session required." }, { status: 401 });
 
   const { id } = await params;
   const project = await findAccessibleProject(id);

@@ -4,20 +4,25 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { prisma } from "@project-relay/database";
 import { createAssistantMessage, createConversation, createUserMessage, getOrCreateProviderSession } from "@project-relay/database";
 import { CSRF_COOKIE, CSRF_HEADER } from "../../lib/csrf";
+import { LOCAL_SESSION_COOKIE } from "../../lib/local-auth-shared";
 import { GET as listConversations, POST as createConversationRoute } from "./projects/[id]/conversations/route";
 import { GET as getConversationDetail } from "./conversations/[id]/route";
 import { GET as listConversationMessagesRoute } from "./conversations/[id]/messages/route";
 
 const ORIGIN = "http://localhost:3300";
 const CSRF_TOKEN = "test-csrf-token";
+let sessionToken: string;
 
-function jsonRequest(url: string, options: { method?: string; body?: unknown; withCsrf?: boolean; origin?: string | null } = {}) {
+function jsonRequest(url: string, options: { method?: string; body?: unknown; withCsrf?: boolean; withSession?: boolean; origin?: string | null } = {}) {
   const headers = new Headers();
   headers.set("content-type", "application/json");
+  const cookies: string[] = [];
   if (options.withCsrf !== false) {
     headers.set(CSRF_HEADER, CSRF_TOKEN);
-    headers.set("cookie", `${CSRF_COOKIE}=${CSRF_TOKEN}`);
+    cookies.push(`${CSRF_COOKIE}=${CSRF_TOKEN}`);
   }
+  if (options.withSession !== false) cookies.push(`${LOCAL_SESSION_COOKIE}=${sessionToken}`);
+  if (cookies.length) headers.set("cookie", cookies.join("; "));
   if (options.origin !== null) headers.set("origin", options.origin ?? ORIGIN);
   return new NextRequest(url, {
     method: options.method ?? "GET",
@@ -50,6 +55,9 @@ describe("conversation CRUD API", () => {
       },
     });
     otherProjectId = otherProject.id;
+
+    const session = await prisma.localSession.create({ data: { token: `test-session-${randomUUID()}` } });
+    sessionToken = session.token;
   });
 
   afterAll(async () => {
@@ -107,6 +115,16 @@ describe("conversation CRUD API", () => {
       });
       const response = await createConversationRoute(request, { params: Promise.resolve({ id: projectId }) });
       expect(response.status).toBe(400);
+    });
+
+    it("rejects a request without a valid local session even with a valid CSRF token", async () => {
+      const request = jsonRequest(`${ORIGIN}/api/projects/${projectId}/conversations`, {
+        method: "POST",
+        body: { title: "Should fail" },
+        withSession: false,
+      });
+      const response = await createConversationRoute(request, { params: Promise.resolve({ id: projectId }) });
+      expect(response.status).toBe(401);
     });
   });
 

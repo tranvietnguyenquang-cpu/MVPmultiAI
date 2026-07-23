@@ -87,6 +87,26 @@ export function canVerify(criteria: Array<{ evidence: Array<{ successful: boolea
 export function criterionAcceptsEvidence(criterion:{evidenceKinds:string[];commandIds:string[]},evidence:{kind:string;commandId?:string}):boolean{return criterion.evidenceKinds.includes(evidence.kind)&&(!criterion.commandIds.length||Boolean(evidence.commandId&&criterion.commandIds.includes(evidence.commandId)));}
 export function compactReviewCapsule(capsule:TaskCapsuleContent):TaskCapsuleContent{return{...capsule,codingRules:capsule.codingRules.slice(0,4_000),knownIssues:capsule.knownIssues.slice(0,4_000),sourceContext:capsule.sourceContext.slice(0,10).map(item=>({...item,summary:item.summary.slice(0,2_000)})),latestTestEvidence:capsule.latestTestEvidence.slice(0,20).map(item=>({...item,summary:item.summary.slice(0,2_000)}))};}
 
+export function isLoopbackHost(host: string): boolean {
+  const normalized = host.trim().toLowerCase().replace(/^\[/, "").replace(/\]$/, "").replace(/^::ffff:/, "");
+  if (!normalized) return false;
+  if (normalized === "localhost" || normalized === "127.0.0.1" || normalized === "::1") return true;
+  return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(normalized);
+}
+
+export function assertLoopbackHost(host: string, context: string): void {
+  if (!isLoopbackHost(host)) {
+    throw new Error(`${context} must be loopback-only for this local-first build; refusing host '${host}'.`);
+  }
+}
+
+export function isLoopbackRequestHeaders(input: { host: string | null; forwardedFor: string | null; forwardedHost: string | null }): boolean {
+  if (input.forwardedFor || input.forwardedHost) return false;
+  if (!input.host) return false;
+  const hostname = input.host.split(":")[0] ?? "";
+  return isLoopbackHost(hostname);
+}
+
 export type LockedDecisionRule = { id: string; forbiddenPaths: string[]; requiredPatterns: string[] };
 function globPattern(pattern: string): RegExp {
   const escaped=pattern.replace(/[.+^${}()|[\]\\]/g,"\\$&").replace(/\*\*/g,".*").replace(/\*/g,"[^/]*");
