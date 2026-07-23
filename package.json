@@ -7,6 +7,7 @@
     "packages/*"
   ],
   "scripts": {
+    "predev": "npm run db:generate",
     "dev": "npm-run-all --parallel dev:web dev:worker",
     "dev:web": "npm run dev -w @project-relay/web",
     "dev:worker": "npm run dev -w @project-relay/worker",
