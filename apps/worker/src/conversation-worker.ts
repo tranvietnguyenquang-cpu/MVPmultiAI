@@ -5,9 +5,12 @@ import { redactSecrets } from "@project-relay/execution";
 import type { AgentSession as ProviderAgentSession, CodingProvider, ProviderRegistry, ProviderRole } from "@project-relay/providers";
 import { providerRegistry as defaultRegistry, StaleProviderSessionError } from "@project-relay/providers";
 import { conversationMessageJobSchema, getProviderModeCapability, type ConversationMessageJob, type JsonValue, type TaskCapsuleContent } from "@project-relay/shared";
+import { claimAgentSession, DEFAULT_LEASE_MS, newWorkerId, releasedLeaseFields, startHeartbeat } from "./worker-lease.js";
 
 const MAX_ASSISTANT_MESSAGE_BYTES = 65_536;
 const DEFAULT_TIMEOUT_MS = Number(process.env.PROJECT_RELAY_CONVERSATION_TIMEOUT_MS ?? 120_000);
+/** Stable for the lifetime of this process; every claim/heartbeat from this worker shares one identity unless a caller injects its own (e.g. tests simulating multiple workers). */
+const PROCESS_WORKER_ID = newWorkerId();
 
 async function event(sessionId: string, type: string, message: string, stream?: string) {
   await prisma.agentEvent.create({ data: { sessionId, type, message, ...(stream ? { stream } : {}) } });
@@ -64,6 +67,8 @@ async function buildConversationCapsule(input: {
 export type ConversationWorkerDeps = {
   registry?: Pick<ProviderRegistry, "get">;
   timeoutMs?: number;
+  workerId?: string;
+  leaseMs?: number;
 };
 
 type LoadedAgentSession = Awaited<ReturnType<typeof loadAgentSession>>;
@@ -162,10 +167,28 @@ async function executeProviderTurn(input: {
 export async function processConversationMessage(job: Job<ConversationMessageJob>, deps: ConversationWorkerDeps = {}): Promise<void> {
   const registry = deps.registry ?? defaultRegistry;
   const timeoutMs = deps.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const workerId = deps.workerId ?? PROCESS_WORKER_ID;
+  const leaseMs = deps.leaseMs ?? DEFAULT_LEASE_MS;
   const data = conversationMessageJobSchema.parse(job.data);
 
-  const claimed = await prisma.agentSession.updateMany({ where: { id: data.sessionId, state: "QUEUED" }, data: { state: "STARTING", startedAt: new Date() } });
-  if (!claimed.count) return;
+  const claimed = await claimAgentSession(data.sessionId, workerId, leaseMs);
+  if (!claimed) return;
+
+  const stopHeartbeat = startHeartbeat(data.sessionId, workerId, leaseMs);
+  try {
+    await processClaimedConversationMessage({ data, registry, timeoutMs, workerId });
+  } finally {
+    stopHeartbeat();
+  }
+}
+
+async function processClaimedConversationMessage(input: {
+  data: ConversationMessageJob;
+  registry: Pick<ProviderRegistry, "get">;
+  timeoutMs: number;
+  workerId: string;
+}): Promise<void> {
+  const { data, registry, timeoutMs, workerId } = input;
 
   const session = await loadAgentSession(data.sessionId);
   if (!session) throw new Error("Queued conversation execution references a missing agent session.");
@@ -182,7 +205,7 @@ export async function processConversationMessage(job: Job<ConversationMessageJob
 
   const validationError = validateExecutionRelationships({ data, session, conversation, userMessage, routingDecision, providerSession, handoffCapsule });
   if (validationError) {
-    await prisma.agentSession.updateMany({ where: { id: session.id, state: "STARTING" }, data: { state: "FAILED", endedAt: new Date(), error: validationError } });
+    await prisma.agentSession.updateMany({ where: { id: session.id, state: "STARTING", workerId }, data: { state: "FAILED", endedAt: new Date(), error: validationError, ...releasedLeaseFields } });
     await event(session.id, "state", validationError);
     throw new Error(validationError);
   }
@@ -259,8 +282,8 @@ export async function processConversationMessage(job: Job<ConversationMessageJob
 
     await prisma.$transaction(async tx => {
       const finalized = await tx.agentSession.updateMany({
-        where: { id: session.id, state: "RUNNING" },
-        data: { state: "SUCCEEDED", endedAt: new Date(), exitCode: 0, usage, externalId: externalSessionId }
+        where: { id: session.id, state: "RUNNING", workerId },
+        data: { state: "SUCCEEDED", endedAt: new Date(), exitCode: 0, usage, externalId: externalSessionId, ...releasedLeaseFields }
       });
       if (!finalized.count) return;
       const assistantMessage = await tx.conversationMessage.create({
@@ -287,7 +310,7 @@ export async function processConversationMessage(job: Job<ConversationMessageJob
   } catch (error) {
     const message = redactSecrets(error instanceof Error ? error.message : "Worker failure").slice(0, MAX_ASSISTANT_MESSAGE_BYTES);
     await prisma.$transaction(async tx => {
-      const finalized = await tx.agentSession.updateMany({ where: { id: session.id, state: { in: ["RUNNING", "STARTING"] } }, data: { state: "FAILED", endedAt: new Date(), error: message } });
+      const finalized = await tx.agentSession.updateMany({ where: { id: session.id, state: { in: ["RUNNING", "STARTING"] }, workerId }, data: { state: "FAILED", endedAt: new Date(), error: message, ...releasedLeaseFields } });
       if (!finalized.count) return;
       await tx.conversationMessage.create({
         data: {

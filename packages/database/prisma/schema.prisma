@@ -381,10 +381,15 @@ model AgentSession {
   userMessageId String? @unique
   userMessage ConversationMessage? @relation("TriggerMessage",fields:[userMessageId],references:[id],onDelete:SetNull)
   assistantMessage ConversationMessage? @relation("AssistantMessage")
+  /** Owning worker's process id while STARTING/RUNNING; cleared once terminal. */
+  workerId    String?
+  /** Renewed by the owning worker's heartbeat; a recovery sweep only reclaims sessions whose lease has actually expired (or was never leased at all). */
+  leaseExpiresAt DateTime?
   createdAt   DateTime @default(now())
   events      AgentEvent[]
   evidence    Evidence[]
   @@index([conversationId])
+  @@index([state, leaseExpiresAt])
 }
 
 model ReviewFinding {
