@@ -2,8 +2,8 @@ import type { Job } from "bullmq";
 import { prisma } from "@project-relay/database";
 import { createTaskCapsule } from "@project-relay/context-engine";
 import { redactSecrets } from "@project-relay/execution";
-import type { ProviderRegistry, ProviderRole } from "@project-relay/providers";
-import { providerRegistry as defaultRegistry } from "@project-relay/providers";
+import type { AgentSession as ProviderAgentSession, CodingProvider, ProviderRegistry, ProviderRole } from "@project-relay/providers";
+import { providerRegistry as defaultRegistry, StaleProviderSessionError } from "@project-relay/providers";
 import { conversationMessageJobSchema, getProviderModeCapability, type ConversationMessageJob, type JsonValue, type TaskCapsuleContent } from "@project-relay/shared";
 
 const MAX_ASSISTANT_MESSAGE_BYTES = 65_536;
@@ -121,6 +121,44 @@ function validateExecutionRelationships(input: {
   return null;
 }
 
+/**
+ * Runs a single provider turn (resumed or fresh) and returns the extracted assistant text.
+ * Only "stdout" events become the persisted assistant answer; state/usage/stderr events
+ * are diagnostic-only and must never leak into the conversation transcript.
+ */
+async function executeProviderTurn(input: {
+  provider: CodingProvider;
+  providerAgentSession: ProviderAgentSession;
+  capsule: TaskCapsuleContent;
+  resume: boolean;
+  timeoutMs: number;
+  sessionId: string;
+}): Promise<string> {
+  let assistantText = "";
+  const consume = (async () => {
+    for await (const item of input.provider.streamEvents(input.providerAgentSession.id)) {
+      if (item.type === "stdout") assistantText += item.message;
+      await event(input.sessionId, item.type, item.message, item.type === "stdout" || item.type === "stderr" ? item.type : undefined);
+    }
+  })();
+
+  const controller = new AbortController();
+  let timedOut = false;
+  const timer = setTimeout(() => { timedOut = true; controller.abort(); }, input.timeoutMs);
+  try {
+    if (input.resume) await input.provider.resumeSession(input.providerAgentSession, input.capsule, controller.signal);
+    else await input.provider.startSession(input.providerAgentSession, input.capsule, controller.signal);
+    await consume;
+  } catch (runError) {
+    if (timedOut) throw new Error(`${input.provider.name} execution timed out after ${input.timeoutMs}ms.`);
+    throw runError;
+  } finally {
+    clearTimeout(timer);
+  }
+  if (timedOut) throw new Error(`${input.provider.name} execution timed out after ${input.timeoutMs}ms.`);
+  return assistantText;
+}
+
 export async function processConversationMessage(job: Job<ConversationMessageJob>, deps: ConversationWorkerDeps = {}): Promise<void> {
   const registry = deps.registry ?? defaultRegistry;
   const timeoutMs = deps.timeoutMs ?? DEFAULT_TIMEOUT_MS;
@@ -180,41 +218,44 @@ export async function processConversationMessage(job: Job<ConversationMessageJob
     const role = roleForMode(userMessage.mode);
     const capability = getProviderModeCapability(session.providerId, userMessage.mode);
     if (!capability) throw new Error(`Unsupported execution: ${session.providerId} does not support ${userMessage.mode} mode.`);
-    const providerAgentSession = await provider.createSession({
+
+    // Resume only the same conversation/provider session: providerSession is already
+    // scoped to (conversationId, providerId), so its own externalSessionId (if any) is
+    // the prior turn's real external thread id for this exact provider in this exact
+    // conversation - never another provider's, another conversation's, or a fabricated one.
+    const resumeExternalId = providerSession.externalSessionId ?? undefined;
+    let providerAgentSession = await provider.createSession({
       workspace: session.project.repositoryPath,
       taskId: session.taskId,
       capability,
-      ...(role ? { role } : {})
+      ...(role ? { role } : {}),
+      ...(resumeExternalId ? { resumeExternalId } : {})
     });
-    await event(session.id, "state", `Running ${status.version ?? provider.name}.`);
+    await event(session.id, "state", resumeExternalId ? `Resuming ${provider.name} session ${resumeExternalId}.` : `Running ${status.version ?? provider.name}.`);
 
-    // Only "stdout" events become the persisted assistant answer; state/usage/stderr
-    // events are diagnostic-only and must never leak into the conversation transcript.
-    let providerOutput = "";
-    const consume = (async () => {
-      for await (const item of provider.streamEvents(providerAgentSession.id)) {
-        if (item.type === "stdout") providerOutput += item.message;
-        await event(session.id, item.type, item.message, item.type === "stdout" || item.type === "stderr" ? item.type : undefined);
-      }
-    })();
-
-    const controller = new AbortController();
-    let timedOut = false;
-    const timer = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
+    let assistantText: string;
     try {
-      await provider.startSession(providerAgentSession, capsule, controller.signal);
-      await consume;
+      assistantText = await executeProviderTurn({ provider, providerAgentSession, capsule, resume: Boolean(resumeExternalId), timeoutMs, sessionId: session.id });
     } catch (runError) {
-      if (timedOut) throw new Error(`${provider.name} execution timed out after ${timeoutMs}ms.`);
-      throw runError;
-    } finally {
-      clearTimeout(timer);
+      if (!resumeExternalId || !(runError instanceof StaleProviderSessionError)) throw runError;
+      // The resumed external session is gone: fall back safely to a brand new provider
+      // session (never re-throwing the stale id) and record the transition so it's visible
+      // in the execution history rather than silently swallowed.
+      await event(session.id, "state", `Prior ${provider.name} session ${resumeExternalId} is no longer available; starting a fresh session.`);
+      providerAgentSession = await provider.createSession({
+        workspace: session.project.repositoryPath,
+        taskId: session.taskId,
+        capability,
+        ...(role ? { role } : {})
+      });
+      assistantText = await executeProviderTurn({ provider, providerAgentSession, capsule, resume: false, timeoutMs, sessionId: session.id });
     }
-    if (timedOut) throw new Error(`${provider.name} execution timed out after ${timeoutMs}ms.`);
 
     const usage = await provider.getUsage(providerAgentSession.id);
-    const redactedOutput = redactSecrets(providerOutput || "(no output)").slice(0, MAX_ASSISTANT_MESSAGE_BYTES);
-    const externalSessionId = providerAgentSession.externalId ?? providerAgentSession.id;
+    const redactedOutput = redactSecrets(assistantText || "(no output)").slice(0, MAX_ASSISTANT_MESSAGE_BYTES);
+    // Never fall back to the internal session UUID: an absent externalId means the
+    // provider genuinely never reported one, and that must be persisted as null.
+    const externalSessionId = providerAgentSession.externalId ?? null;
 
     await prisma.$transaction(async tx => {
       const finalized = await tx.agentSession.updateMany({

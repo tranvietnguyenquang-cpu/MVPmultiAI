@@ -4,6 +4,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { prisma, queueConversationMessage } from "@project-relay/database";
 import type { AgentSession as ProviderAgentSession, CodingProvider, ProviderProbe } from "@project-relay/providers";
 import type { ConversationMessageJob, TaskCapsuleContent } from "@project-relay/shared";
+import { StaleProviderSessionError } from "@project-relay/providers";
 import { processConversationMessage } from "./conversation-worker.js";
 
 type FakeProviderOverrides = Partial<{
@@ -12,6 +13,7 @@ type FakeProviderOverrides = Partial<{
   externalId: string;
   events: Array<{ type: "state" | "stdout" | "stderr" | "usage"; message: string }>;
   startSession: CodingProvider["startSession"];
+  resumeSession: CodingProvider["resumeSession"];
   streamEvents: CodingProvider["streamEvents"];
 }>;
 
@@ -57,10 +59,10 @@ function makeFakeProvider(id: "codex-cli" | "claude-cli", overrides: FakeProvide
     sendTask: async (session, capsule, signal) => { await provider.startSession(session, capsule, signal); },
     streamEvents,
     cancelSession: vi.fn(async () => undefined),
-    resumeSession: vi.fn(overrides.startSession ?? defaultStartSession),
+    resumeSession: vi.fn(overrides.resumeSession ?? overrides.startSession ?? defaultStartSession),
     getUsage: vi.fn(async () => ({ estimated: true }))
   };
-  return { provider, capturedCapsules, createSession, startSession, streamEvents };
+  return { provider, capturedCapsules, createSession, startSession, resumeSession: provider.resumeSession as ReturnType<typeof vi.fn>, streamEvents };
 }
 
 function makeRegistry(providers: Record<string, CodingProvider>) {
@@ -364,5 +366,160 @@ describe("conversation worker execution", () => {
     expect(fake.createSession).toHaveBeenCalledTimes(1);
     const assistants = await prisma.conversationMessage.findMany({ where: { conversationId: conversation.id, role: "ASSISTANT" } });
     expect(assistants).toHaveLength(1);
+  });
+});
+
+describe("safe provider session resume", () => {
+  let projectId: string;
+
+  beforeAll(async () => {
+    const project = await prisma.project.create({
+      data: { name: `conversation-resume-test-${randomUUID()}`, repositoryPath: `/tmp/conversation-resume-test-${randomUUID()}`, allowedCommands: [], permittedPaths: [] }
+    });
+    projectId = project.id;
+  });
+
+  afterAll(async () => {
+    await prisma.project.delete({ where: { id: projectId } }).catch(() => undefined);
+  });
+
+  async function newConversation(title: string) {
+    return prisma.conversation.create({ data: { projectId, title } });
+  }
+
+  async function latestAssistant(conversationId: string) {
+    return prisma.conversationMessage.findFirstOrThrow({ where: { conversationId, role: "ASSISTANT" }, orderBy: [{ createdAt: "desc" }, { id: "desc" }] });
+  }
+
+  it("never falls back to the internal session id when the provider reports no external session id", async () => {
+    const conversation = await newConversation("No external id observed");
+    const fake = makeFakeProvider("codex-cli");
+    const { payload, result } = await queueTestMessage({ conversationId: conversation.id, projectId, content: "hello", selectedProviderId: "codex-cli" });
+
+    await processConversationMessage({ data: payload } as unknown as Job<ConversationMessageJob>, { registry: makeRegistry({ "codex-cli": fake.provider }) });
+
+    const session = await prisma.agentSession.findUniqueOrThrow({ where: { id: payload.sessionId } });
+    expect(session.externalId).toBeNull();
+    const providerSession = await prisma.providerSession.findUniqueOrThrow({ where: { id: result.providerSession.id } });
+    expect(providerSession.externalSessionId).toBeNull();
+  });
+
+  it("does not resume on the first turn and resumes the same provider session on a second turn", async () => {
+    const conversation = await newConversation("Same provider resume");
+    const fake = makeFakeProvider("codex-cli", { externalId: "codex-thread-A" });
+    const registry = makeRegistry({ "codex-cli": fake.provider });
+
+    const turn1 = await queueTestMessage({ conversationId: conversation.id, projectId, content: "first", selectedProviderId: "codex-cli" });
+    await processConversationMessage({ data: turn1.payload } as unknown as Job<ConversationMessageJob>, { registry });
+    expect(fake.createSession.mock.calls[0]?.[0]).not.toHaveProperty("resumeExternalId");
+    expect(fake.resumeSession).not.toHaveBeenCalled();
+
+    const afterTurn1 = await latestAssistant(conversation.id);
+    const turn2 = await queueTestMessage({
+      conversationId: conversation.id, projectId, content: "second", selectedProviderId: "codex-cli",
+      previousAssistantMessage: { id: afterTurn1.id, providerId: "codex-cli" }
+    });
+    await processConversationMessage({ data: turn2.payload } as unknown as Job<ConversationMessageJob>, { registry });
+
+    expect(fake.createSession).toHaveBeenCalledTimes(2);
+    expect(fake.createSession.mock.calls[1]?.[0]).toMatchObject({ resumeExternalId: "codex-thread-A" });
+    expect(fake.resumeSession).toHaveBeenCalledTimes(1);
+    expect(fake.startSession).toHaveBeenCalledTimes(1);
+  });
+
+  it("resumes the original Codex session across a Codex -> Claude -> Codex sequence", async () => {
+    const conversation = await newConversation("Codex Claude Codex resume");
+    const codex = makeFakeProvider("codex-cli", { externalId: "codex-thread-1" });
+    const claude = makeFakeProvider("claude-cli", { externalId: "claude-thread-1" });
+    const registry = makeRegistry({ "codex-cli": codex.provider, "claude-cli": claude.provider });
+
+    const turn1 = await queueTestMessage({ conversationId: conversation.id, projectId, content: "hello codex", selectedProviderId: "codex-cli" });
+    await processConversationMessage({ data: turn1.payload } as unknown as Job<ConversationMessageJob>, { registry });
+
+    const afterTurn1 = await latestAssistant(conversation.id);
+    const turn2 = await queueTestMessage({
+      conversationId: conversation.id, projectId, content: "switch to claude", selectedProviderId: "claude-cli",
+      previousAssistantMessage: { id: afterTurn1.id, providerId: "codex-cli" }
+    });
+    await processConversationMessage({ data: turn2.payload } as unknown as Job<ConversationMessageJob>, { registry });
+
+    const afterTurn2 = await latestAssistant(conversation.id);
+    const turn3 = await queueTestMessage({
+      conversationId: conversation.id, projectId, content: "back to codex", selectedProviderId: "codex-cli",
+      previousAssistantMessage: { id: afterTurn2.id, providerId: "claude-cli" }
+    });
+    await processConversationMessage({ data: turn3.payload } as unknown as Job<ConversationMessageJob>, { registry });
+
+    // Codex's second createSession call (turn 3) must resume the same external id from turn 1,
+    // never something introduced by the interleaved Claude turn.
+    expect(codex.createSession).toHaveBeenCalledTimes(2);
+    expect(codex.createSession.mock.calls[1]?.[0]).toMatchObject({ resumeExternalId: "codex-thread-1" });
+    expect(codex.resumeSession).toHaveBeenCalledTimes(1);
+    expect(claude.createSession).toHaveBeenCalledTimes(1);
+    expect(claude.createSession.mock.calls[0]?.[0]).not.toHaveProperty("resumeExternalId");
+  });
+
+  it("resumes the original Claude session across a Claude -> Codex -> Claude sequence", async () => {
+    const conversation = await newConversation("Claude Codex Claude resume");
+    const claude = makeFakeProvider("claude-cli", { externalId: "claude-thread-1" });
+    const codex = makeFakeProvider("codex-cli", { externalId: "codex-thread-1" });
+    const registry = makeRegistry({ "codex-cli": codex.provider, "claude-cli": claude.provider });
+
+    const turn1 = await queueTestMessage({ conversationId: conversation.id, projectId, content: "hello claude", selectedProviderId: "claude-cli" });
+    await processConversationMessage({ data: turn1.payload } as unknown as Job<ConversationMessageJob>, { registry });
+
+    const afterTurn1 = await latestAssistant(conversation.id);
+    const turn2 = await queueTestMessage({
+      conversationId: conversation.id, projectId, content: "switch to codex", selectedProviderId: "codex-cli",
+      previousAssistantMessage: { id: afterTurn1.id, providerId: "claude-cli" }
+    });
+    await processConversationMessage({ data: turn2.payload } as unknown as Job<ConversationMessageJob>, { registry });
+
+    const afterTurn2 = await latestAssistant(conversation.id);
+    const turn3 = await queueTestMessage({
+      conversationId: conversation.id, projectId, content: "back to claude", selectedProviderId: "claude-cli",
+      previousAssistantMessage: { id: afterTurn2.id, providerId: "codex-cli" }
+    });
+    await processConversationMessage({ data: turn3.payload } as unknown as Job<ConversationMessageJob>, { registry });
+
+    expect(claude.createSession).toHaveBeenCalledTimes(2);
+    expect(claude.createSession.mock.calls[1]?.[0]).toMatchObject({ resumeExternalId: "claude-thread-1" });
+    expect(claude.resumeSession).toHaveBeenCalledTimes(1);
+    expect(codex.createSession).toHaveBeenCalledTimes(1);
+    expect(codex.createSession.mock.calls[0]?.[0]).not.toHaveProperty("resumeExternalId");
+  });
+
+  it("falls back safely to a new session when the resumed external session is stale, and records the transition", async () => {
+    const conversation = await newConversation("Stale resume fallback");
+    const fake = makeFakeProvider("codex-cli", {
+      externalId: "codex-thread-fresh",
+      resumeSession: async () => { throw new StaleProviderSessionError("No session found with id codex-thread-old."); }
+    });
+    const registry = makeRegistry({ "codex-cli": fake.provider });
+
+    const turn1 = await queueTestMessage({ conversationId: conversation.id, projectId, content: "hello", selectedProviderId: "codex-cli" });
+    await processConversationMessage({ data: turn1.payload } as unknown as Job<ConversationMessageJob>, { registry });
+    // Simulate a previously recorded external id that the CLI no longer recognizes.
+    await prisma.providerSession.update({ where: { id: turn1.result.providerSession.id }, data: { externalSessionId: "codex-thread-old" } });
+
+    const afterTurn1 = await latestAssistant(conversation.id);
+    const turn2 = await queueTestMessage({
+      conversationId: conversation.id, projectId, content: "continue", selectedProviderId: "codex-cli",
+      previousAssistantMessage: { id: afterTurn1.id, providerId: "codex-cli" }
+    });
+    await processConversationMessage({ data: turn2.payload } as unknown as Job<ConversationMessageJob>, { registry });
+
+    expect(fake.resumeSession).toHaveBeenCalledTimes(1);
+    expect(fake.createSession).toHaveBeenCalledTimes(3); // turn1 fresh + turn2 resume attempt + turn2 fresh fallback
+    expect(fake.startSession).toHaveBeenCalledTimes(2); // turn1 fresh run + turn2's fallback fresh run
+
+    const transitionEvent = await prisma.agentEvent.findFirst({ where: { sessionId: turn2.payload.sessionId, message: { contains: "no longer available" } } });
+    expect(transitionEvent).not.toBeNull();
+
+    const session2 = await prisma.agentSession.findUniqueOrThrow({ where: { id: turn2.payload.sessionId } });
+    expect(session2.state).toBe("SUCCEEDED");
+
+    const providerSessionAfter = await prisma.providerSession.findUniqueOrThrow({ where: { id: turn1.result.providerSession.id } });
+    expect(providerSessionAfter.externalSessionId).toBe("codex-thread-fresh");
   });
 });
