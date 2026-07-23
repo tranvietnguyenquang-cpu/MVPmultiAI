@@ -27,16 +27,24 @@ type FakeProviderOverrides = Partial<{
 function makeFakeProvider(id: "codex-cli" | "claude-cli", overrides: FakeProviderOverrides = {}) {
   const events = overrides.events ?? [{ type: "stdout" as const, message: "ok" }];
   const capturedCapsules: TaskCapsuleContent[] = [];
-  const createSession = vi.fn(async (input: { workspace: string; taskId: string; capability: ProviderAgentSession["capability"]; role?: string; resumeExternalId?: string }): Promise<ProviderAgentSession> => ({
+  const createSession = vi.fn(async (input: { workspace: string; taskId: string; capability: ProviderAgentSession["capability"]; role?: string; resumeExternalId?: string; processLifecycle?: ProviderAgentSession["processLifecycle"] }): Promise<ProviderAgentSession> => ({
     id: randomUUID(),
     providerId: id,
     workspace: input.workspace,
     taskId: input.taskId,
     role: (input.role as ProviderAgentSession["role"]) ?? "IMPLEMENTER",
     capability: input.capability,
-    ...(overrides.externalId ? { externalId: overrides.externalId } : {})
+    ...(overrides.externalId ? { externalId: overrides.externalId } : {}),
+    ...(input.processLifecycle ? { processLifecycle: input.processLifecycle } : {})
   }));
-  const defaultStartSession: CodingProvider["startSession"] = async (_session, capsule) => { capturedCapsules.push(capsule); };
+  const defaultStartSession: CodingProvider["startSession"] = async (session, capsule) => {
+    await session.processLifecycle?.onProcessStarted({
+      pid: 31_415,
+      processStartIdentity: "2026-07-23T00:00:00.000Z",
+      processStartedAt: new Date("2026-07-23T00:00:00.000Z"),
+    });
+    capturedCapsules.push(capsule);
+  };
   const startSession = vi.fn(overrides.startSession ?? defaultStartSession);
   const defaultStreamEvents: CodingProvider["streamEvents"] = async function* () {
     for (const item of events) yield { type: item.type, message: item.message, timestamp: new Date() };
@@ -144,6 +152,9 @@ describe("conversation worker execution", () => {
 
     const session = await prisma.agentSession.findUniqueOrThrow({ where: { id: payload.sessionId } });
     expect(session.state).toBe("SUCCEEDED");
+    expect(session.providerRootPid).toBe(31_415);
+    expect(session.providerProcessStartedAt?.toISOString()).toBe("2026-07-23T00:00:00.000Z");
+    expect(session.workerId).toBeNull();
     const assistant = await prisma.conversationMessage.findFirstOrThrow({ where: { conversationId: conversation.id, role: "ASSISTANT" } });
     expect(assistant.status).toBe("COMPLETED");
     expect(assistant.content).toContain("CODEX_MARKER_RESPONSE");
@@ -158,6 +169,7 @@ describe("conversation worker execution", () => {
 
     const session = await prisma.agentSession.findUniqueOrThrow({ where: { id: payload.sessionId } });
     expect(session.state).toBe("SUCCEEDED");
+    expect(session.providerRootPid).toBe(31_415);
     const assistant = await prisma.conversationMessage.findFirstOrThrow({ where: { conversationId: conversation.id, role: "ASSISTANT" } });
     expect(assistant.content).toContain("CLAUDE_MARKER_RESPONSE");
   });

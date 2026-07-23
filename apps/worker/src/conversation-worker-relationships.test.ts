@@ -2,13 +2,27 @@ import { randomUUID } from "node:crypto";
 import type { Job } from "bullmq";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { prisma, queueConversationMessage } from "@project-relay/database";
-import type { CodingProvider, ProviderProbe } from "@project-relay/providers";
+import type { AgentSession as ProviderAgentSession, CodingProvider, ProviderProbe } from "@project-relay/providers";
 import type { ConversationMessageJob } from "@project-relay/shared";
 import { processConversationMessage } from "./conversation-worker.js";
 
 function makeFakeProvider(id: "codex-cli" | "claude-cli") {
-  const createSession = vi.fn(async () => ({ id: randomUUID(), providerId: id, workspace: "/tmp/x", taskId: "t", role: "IMPLEMENTER" as const, capability: "READ_ONLY" as const }));
-  const startSession = vi.fn(async () => undefined);
+  const createSession = vi.fn(async (input: { processLifecycle?: ProviderAgentSession["processLifecycle"] }) => ({
+    id: randomUUID(),
+    providerId: id,
+    workspace: "/tmp/x",
+    taskId: "t",
+    role: "IMPLEMENTER" as const,
+    capability: "READ_ONLY" as const,
+    ...(input.processLifecycle ? { processLifecycle: input.processLifecycle } : {}),
+  }));
+  const startSession = vi.fn(async (session: ProviderAgentSession) => {
+    await session.processLifecycle?.onProcessStarted({
+      pid: 31_416,
+      processStartIdentity: "2026-07-23T00:00:00.000Z",
+      processStartedAt: new Date("2026-07-23T00:00:00.000Z"),
+    });
+  });
   const provider: CodingProvider = {
     id,
     name: id === "codex-cli" ? "Codex CLI" : "Claude CLI",

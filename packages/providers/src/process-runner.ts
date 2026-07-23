@@ -20,6 +20,7 @@ import type {
   ProviderAuthentication,
   ProviderId,
   ProviderProbe,
+  ProviderProcessStart,
   ProviderRole,
 } from "./types.js";
 import {
@@ -294,6 +295,7 @@ export abstract class CliProvider implements CodingProvider {
       role: input.role ?? this.defaultRoles[0]!,
       capability: input.capability,
       ...(input.resumeExternalId ? { externalId: input.resumeExternalId } : {}),
+      ...(input.processLifecycle ? { processLifecycle: input.processLifecycle } : {}),
     };
     this.sessions.set(session.id, {
       events: [],
@@ -365,8 +367,9 @@ export abstract class CliProvider implements CodingProvider {
         return;
       }
       record.child = child;
-      const err = new StreamSafeRedactor(65_536);
-      const consumeLine = (line: ReaderLine) => {
+      const beginOutputProcessing = () => {
+        const err = new StreamSafeRedactor(65_536);
+        const consumeLine = (line: ReaderLine) => {
         for (const event of accumulator.consumeReaderLine(line)) {
           if (event.kind === "assistant" || event.kind === "assistant-final") {
             pushEvent({ type: "stdout", message: event.text, timestamp: new Date() });
@@ -376,19 +379,19 @@ export abstract class CliProvider implements CodingProvider {
             pushEvent({ type: "usage", message: JSON.stringify(event.usage), timestamp: new Date() });
           }
         }
-      };
+        };
 
-      child.stdout?.on("data", (chunk: Buffer) => {
-        for (const line of reader.push(chunk.toString("utf8"))) consumeLine(line);
-      });
-      child.stderr?.on("data", (chunk: Buffer) => err.append(chunk));
-      const abort = () => killProcessTree(child);
-      effective.addEventListener("abort", abort, { once: true });
-      child.once("error", (error) => {
-        this.invalidateResolvedExecutable(error);
-        reject(error);
-      });
-      child.once("close", (code) => {
+        child.stdout?.on("data", (chunk: Buffer) => {
+          for (const line of reader.push(chunk.toString("utf8"))) consumeLine(line);
+        });
+        child.stderr?.on("data", (chunk: Buffer) => err.append(chunk));
+        const abort = () => killProcessTree(child);
+        effective.addEventListener("abort", abort, { once: true });
+        child.once("error", (error) => {
+          this.invalidateResolvedExecutable(error);
+          reject(error);
+        });
+        child.once("close", (code) => {
         effective.removeEventListener("abort", abort);
         for (const line of reader.end()) consumeLine(line);
         const stderrText = err.flush();
@@ -416,8 +419,38 @@ export abstract class CliProvider implements CodingProvider {
           return;
         }
         reject(new Error(reason));
-      });
-      child.stdin?.end(prompt);
+        });
+        child.stdin?.end(prompt);
+      };
+
+      const lifecycle = session.processLifecycle;
+      if (!lifecycle) {
+        beginOutputProcessing();
+        return;
+      }
+      if (!child.pid) {
+        void lifecycle.onProcessStartFailure({ pid: 0, error: new Error("Provider spawn did not report a PID.") })
+          .finally(() => {
+            record.complete = true;
+            record.waiters.splice(0).forEach((wake) => wake());
+            reject(new Error("PROVIDER_OWNERSHIP_FAILURE"));
+          });
+        return;
+      }
+      void (async () => {
+        let start: ProviderProcessStart | undefined;
+        try {
+          start = await lifecycle.captureProcessStart(child.pid!);
+          await lifecycle.onProcessStarted(start);
+          beginOutputProcessing();
+        } catch (error) {
+          await lifecycle.onProcessStartFailure({ pid: child.pid!, ...(start ? { start } : {}), error }).catch(() => undefined);
+          killProcessTree(child);
+          record.complete = true;
+          record.waiters.splice(0).forEach((wake) => wake());
+          reject(new Error("PROVIDER_OWNERSHIP_FAILURE"));
+        }
+      })();
     });
   }
 

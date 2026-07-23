@@ -18,6 +18,23 @@ export type QuotaSource =
   | "OFFICIAL_API";
 export type ExecutionCapability = "READ_ONLY" | "WORKSPACE_WRITE";
 
+/** Server-only runtime data captured from the spawned child and operating system. */
+export type ProviderProcessStart = {
+  pid: number;
+  processStartIdentity: string;
+  processStartedAt: Date;
+};
+
+export type ProviderProcessLifecycle = {
+  captureProcessStart(pid: number): Promise<ProviderProcessStart>;
+  onProcessStarted(start: ProviderProcessStart): Promise<void>;
+  onProcessStartFailure(input: {
+    pid: number;
+    start?: ProviderProcessStart;
+    error: unknown;
+  }): Promise<void>;
+};
+
 export type ProviderProbe = {
   providerId: ProviderId;
   installed: boolean;
@@ -41,6 +58,8 @@ export type AgentSessionInput = {
   capability: ExecutionCapability;
   role?: ProviderRole;
   resumeExternalId?: string;
+  /** Worker-internal only; never populated from browser input or provider prompts. */
+  processLifecycle?: ProviderProcessLifecycle;
 };
 
 export type AgentSession = {
@@ -51,6 +70,8 @@ export type AgentSession = {
   role: ProviderRole;
   capability: ExecutionCapability;
   externalId?: string;
+  /** In-memory worker hook; it is intentionally never serialized to provider output. */
+  processLifecycle?: ProviderProcessLifecycle;
 };
 
 export type AgentEvent = {

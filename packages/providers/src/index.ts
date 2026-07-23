@@ -30,6 +30,8 @@ export type {
   ProviderAuthentication,
   ProviderId,
   ProviderProbe,
+  ProviderProcessLifecycle,
+  ProviderProcessStart,
   ProviderRole,
   QuotaSource,
 } from "./types.js";

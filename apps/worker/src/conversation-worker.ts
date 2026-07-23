@@ -2,10 +2,11 @@ import type { Job } from "bullmq";
 import { prisma } from "@project-relay/database";
 import { createTaskCapsule } from "@project-relay/context-engine";
 import { redactSecrets } from "@project-relay/execution";
-import type { AgentSession as ProviderAgentSession, CodingProvider, ProviderRegistry, ProviderRole } from "@project-relay/providers";
+import type { AgentSession as ProviderAgentSession, CodingProvider, ProviderProcessLifecycle, ProviderRegistry, ProviderRole } from "@project-relay/providers";
 import { providerRegistry as defaultRegistry, StaleProviderSessionError } from "@project-relay/providers";
 import { conversationMessageJobSchema, getProviderModeCapability, type ConversationMessageJob, type JsonValue, type TaskCapsuleContent } from "@project-relay/shared";
 import { claimAgentSession, DEFAULT_LEASE_MS, newWorkerId, releasedLeaseFields, startHeartbeat } from "./worker-lease.js";
+import { captureOwnedProcess, terminateNewlySpawnedProcessTree, terminateOwnedProcessTree } from "./owned-process.js";
 
 const MAX_ASSISTANT_MESSAGE_BYTES = 65_536;
 const MIN_TIMEOUT_MS = 60_000;
@@ -99,6 +100,74 @@ function loadAgentSession(id: string) {
   });
 }
 
+function ownershipLifecycle(input: {
+  agentSessionId: string;
+  providerId: string;
+  workerId: string;
+}): ProviderProcessLifecycle {
+  return {
+    async captureProcessStart(pid) {
+      const owned = await captureOwnedProcess({
+        rootPid: pid,
+        agentSessionId: input.agentSessionId,
+        providerId: input.providerId,
+        workerId: input.workerId,
+      });
+      return {
+        pid: owned.rootPid,
+        processStartIdentity: owned.startedAt,
+        processStartedAt: new Date(owned.startedAt),
+      };
+    },
+    async onProcessStarted(start) {
+      const persisted = await prisma.agentSession.updateMany({
+        where: {
+          id: input.agentSessionId,
+          providerId: input.providerId,
+          workerId: input.workerId,
+          state: { in: ["STARTING", "RUNNING"] },
+        },
+        data: {
+          providerRootPid: start.pid,
+          providerProcessStartedAt: start.processStartedAt,
+          state: "RUNNING",
+        },
+      });
+      if (persisted.count !== 1) throw new Error("AgentSession ownership persistence was rejected.");
+    },
+    async onProcessStartFailure({ pid, start }) {
+      const requestedAt = new Date();
+      const result = start
+        ? await terminateOwnedProcessTree({
+            rootPid: pid,
+            expectedStartIdentity: start.processStartIdentity,
+            agentSessionId: input.agentSessionId,
+            reason: "OWNERSHIP_FAILURE",
+          })
+        : await terminateNewlySpawnedProcessTree(pid);
+      await prisma.agentSession.updateMany({
+        where: {
+          id: input.agentSessionId,
+          providerId: input.providerId,
+          workerId: input.workerId,
+          state: { in: ["STARTING", "RUNNING"] },
+        },
+        data: {
+          state: "FAILED",
+          endedAt: new Date(),
+          failureCode: "PROVIDER_OWNERSHIP_FAILURE",
+          error: "Provider process ownership could not be established.",
+          providerTerminationRequestedAt: requestedAt,
+          providerTerminationCompletedAt: new Date(),
+          providerTerminationReason: "OWNERSHIP_FAILURE",
+          providerTerminationResult: result,
+          ...releasedLeaseFields,
+        },
+      });
+    },
+  };
+}
+
 /**
  * The AgentSession is the authority root for a queued conversation execution: every other
  * ID in the job payload is only ever used to *load* a row, never trusted directly. This
@@ -166,6 +235,9 @@ async function executeProviderTurn(input: {
       await event(input.sessionId, item.type, item.message, item.type === "stdout" || item.type === "stderr" ? item.type : undefined);
     }
   })();
+  // The runner may wait for ownership persistence before startSession resolves. Mark an
+  // early stream rejection handled immediately, then rethrow it through `await consume`.
+  void consume.catch(() => undefined);
   try {
     if (input.resume) await input.provider.resumeSession(input.providerAgentSession, input.capsule, controller.signal);
     else await input.provider.startSession(input.providerAgentSession, input.capsule, controller.signal);
@@ -252,7 +324,6 @@ async function processClaimedConversationMessage(input: {
     });
     await event(session.id, "state", "Prompt constructed from bounded conversation context.");
 
-    await prisma.agentSession.update({ where: { id: session.id }, data: { state: "RUNNING" } });
     const role = roleForMode(userMessage.mode);
     const capability = getProviderModeCapability(session.providerId, userMessage.mode);
     if (!capability) throw new Error(`Unsupported execution: ${session.providerId} does not support ${userMessage.mode} mode.`);
@@ -267,7 +338,8 @@ async function processClaimedConversationMessage(input: {
       taskId: session.taskId,
       capability,
       ...(role ? { role } : {}),
-      ...(resumeExternalId ? { resumeExternalId } : {})
+      ...(resumeExternalId ? { resumeExternalId } : {}),
+      processLifecycle: ownershipLifecycle({ agentSessionId: session.id, providerId: session.providerId, workerId }),
     });
     await event(session.id, "state", resumeExternalId ? `Resuming ${provider.name} session ${resumeExternalId}.` : `Running ${status.version ?? provider.name}.`);
 
@@ -284,7 +356,8 @@ async function processClaimedConversationMessage(input: {
         workspace: session.project.repositoryPath,
         taskId: session.taskId,
         capability,
-        ...(role ? { role } : {})
+        ...(role ? { role } : {}),
+        processLifecycle: ownershipLifecycle({ agentSessionId: session.id, providerId: session.providerId, workerId }),
       });
       assistantText = await executeProviderTurn({ provider, providerAgentSession, capsule, resume: false, timeout: providerTimeoutPolicy(session.providerId, userMessage.mode as ConversationMode, timeoutMs), sessionId: session.id });
     }

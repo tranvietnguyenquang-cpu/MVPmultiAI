@@ -95,4 +95,36 @@ describe("conversation execution-state API authorization", () => {
     expect(body.status).toBe("QUEUED");
     expect(body.selectedProvider).toBe("codex-cli");
   });
+
+  it("never exposes owned-process metadata in the execution DTO", async () => {
+    const conversation = await prisma.conversation.create({ data: { projectId, title: "Ownership metadata stays internal" } });
+    const queued = await queueConversationMessage({
+      conversationId: conversation.id,
+      projectId,
+      content: "hello",
+      mode: "ASK",
+      selectedProviderId: "codex-cli",
+      reason: "test",
+      providerHealthSnapshot: {},
+      previousAssistantMessage: null,
+      idempotencyKey: randomUUID(),
+    });
+    await prisma.agentSession.update({
+      where: { id: queued.agentSession.id },
+      data: {
+        providerRootPid: 44_444,
+        providerProcessStartedAt: new Date("2026-07-23T00:00:00.000Z"),
+        providerTerminationReason: "OWNERSHIP_FAILURE",
+      },
+    });
+
+    const request = new NextRequest(`${ORIGIN}/api/conversations/${conversation.id}/executions/${queued.agentSession.id}?projectId=${projectId}`);
+    const response = await getExecution(request, { params: Promise.resolve({ id: conversation.id, executionId: queued.agentSession.id }) });
+    const body = await response.json() as Record<string, unknown>;
+
+    expect(response.status).toBe(200);
+    expect(body).not.toHaveProperty("providerRootPid");
+    expect(body).not.toHaveProperty("providerProcessStartedAt");
+    expect(body).not.toHaveProperty("providerTerminationReason");
+  });
 });
