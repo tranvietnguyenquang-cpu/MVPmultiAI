@@ -1,16 +1,19 @@
 import { createHash } from "node:crypto";
-import { Worker, type Job } from "bullmq";
-import { Prisma, prisma } from "@project-relay/database";
+import { Queue, Worker, type Job } from "bullmq";
+import { dispatchPendingOutboxEvents, Prisma, prisma, recoverStuckOutboxEvents } from "@project-relay/database";
 import { inspectGit, runCommand } from "@project-relay/execution";
 import { appendMemoryUpdate } from "@project-relay/project-memory";
 import { providerRegistry, type ProviderRole } from "@project-relay/providers";
-import { commandSpecSchema, findLockedDecisionConflicts, sessionJobSchema, type CommandSpec, type ConversationMessageJob, type SessionJob, type TaskCapsuleContent } from "@project-relay/shared";
+import { assertLoopbackHost, commandSpecSchema, findLockedDecisionConflicts, sessionJobSchema, type CommandSpec, type ConversationMessageJob, type SessionJob, type TaskCapsuleContent } from "@project-relay/shared";
 import { pollCancellation } from "./cancellation.js";
 import { processConversationMessage } from "./conversation-worker.js";
 import { parseReviewFindings } from "./review-findings.js";
 import { providerHealthMonitor, type ProviderHealthMode } from "./provider-health.js";
 
+const databaseUrl=new URL(process.env.DATABASE_URL??"postgresql://localhost:5432/postgres");
 const redisUrl=new URL(process.env.REDIS_URL??"redis://localhost:6379");
+assertLoopbackHost(databaseUrl.hostname,"DATABASE_URL");
+assertLoopbackHost(redisUrl.hostname,"REDIS_URL");
 const connection={host:redisUrl.hostname,port:Number(redisUrl.port||6379),...(redisUrl.password?{password:decodeURIComponent(redisUrl.password)}:{})};
 const terminalStates=["SUCCEEDED","FAILED","CANCELLED","TIMED_OUT"] as const;
 if(process.env.PROJECT_RELAY_WORKER_CONTAINER==="true")throw new Error("Provider worker must run natively under the signed-in Windows user, not in Docker.");
@@ -52,4 +55,14 @@ const providerHealthWorker=new Worker<{providerId:"codex-cli"|"claude-cli";mode:
 void providerHealthMonitor.startup();const refreshTimer=setInterval(()=>void providerHealthMonitor.refreshAll(),5*60_000);const authTimer=setInterval(()=>void providerHealthMonitor.authenticateAll(),15*60_000);refreshTimer.unref();authTimer.unref();
 worker.on("failed",async(job,error)=>{if(job){const state=await prisma.agentSession.findUnique({where:{id:job.data.sessionId},select:{state:true}});if(state&&!terminalStates.includes(state.state as typeof terminalStates[number]))await prisma.agentSession.update({where:{id:job.data.sessionId},data:{state:"FAILED",endedAt:new Date(),error:error.message}});}});
 conversationWorker.on("failed",async(job,error)=>{if(job){const state=await prisma.agentSession.findUnique({where:{id:job.data.sessionId},select:{state:true}});if(state&&!terminalStates.includes(state.state as typeof terminalStates[number]))await prisma.agentSession.update({where:{id:job.data.sessionId},data:{state:"FAILED",endedAt:new Date(),error:error.message}});}});
-console.log("ProjectRelay worker listening for agent-sessions, conversation-messages, and provider-health jobs.");async function shutdown(){clearInterval(refreshTimer);clearInterval(authTimer);await worker.close();await conversationWorker.close();await providerHealthWorker.close();await prisma.$disconnect();process.exit(0);}process.on("SIGINT",()=>void shutdown());process.on("SIGTERM",()=>void shutdown());
+
+const conversationMessageQueue=new Queue<ConversationMessageJob,void,"route">("conversation-messages",{connection});
+async function publishOutboxEvent(event:{topic:string;jobId:string;payload:unknown}){
+  if(event.topic==="conversation-message"){await conversationMessageQueue.add("route",event.payload as ConversationMessageJob,{jobId:event.jobId,removeOnComplete:100,removeOnFail:100});return;}
+  throw new Error(`Unknown outbox topic '${event.topic}'.`);
+}
+await recoverStuckOutboxEvents();
+const outboxTimer=setInterval(()=>void dispatchPendingOutboxEvents(publishOutboxEvent).catch(error=>console.error("Outbox dispatch failed:",error)),1_000);
+outboxTimer.unref();
+
+console.log("ProjectRelay worker listening for agent-sessions, conversation-messages, and provider-health jobs.");async function shutdown(){clearInterval(refreshTimer);clearInterval(authTimer);clearInterval(outboxTimer);await worker.close();await conversationWorker.close();await providerHealthWorker.close();await conversationMessageQueue.close();await prisma.$disconnect();process.exit(0);}process.on("SIGINT",()=>void shutdown());process.on("SIGTERM",()=>void shutdown());

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import type { ConversationMessageJob } from "@project-relay/shared";
 import { Prisma, prisma } from "./index.js";
+import { createOutboxEventWithClient } from "./outbox-service.js";
 const HANDOFF_MAX_BYTES=32_768;
 function canonical(value:unknown):string{if(Array.isArray(value))return`[${value.map(canonical).join(",")}]`;if(value&&typeof value==="object")return`{${Object.entries(value as Record<string,unknown>).sort(([a],[b])=>a.localeCompare(b)).map(([key,item])=>`${JSON.stringify(key)}:${canonical(item)}`).join(",")}}`;return JSON.stringify(value);}
 export const handoffChecksum=(value:unknown)=>createHash("sha256").update(canonical(value)).digest("hex");
@@ -38,7 +38,6 @@ export type QueueConversationMessageInput={
   reason:string;
   providerHealthSnapshot:Record<string,unknown>;
   previousAssistantMessage:{id:string;providerId:string|null}|null;
-  queueAdd:(payload:ConversationMessageJob)=>Promise<unknown>;
 };
 
 export async function queueConversationMessage(input:QueueConversationMessageInput){
@@ -74,7 +73,7 @@ export async function queueConversationMessage(input:QueueConversationMessageInp
     const purpose=agentSessionPurpose(input.mode);
     const agentSession=await tx.agentSession.create({data:{projectId:input.projectId,taskId,providerId:input.selectedProviderId,state:"QUEUED",purpose,readOnly:purpose!=="IMPLEMENTATION",providerSessionId:providerSession.id,conversationId:input.conversationId}});
 
-    await input.queueAdd({
+    const jobPayload={
       sessionId:agentSession.id,
       taskId,
       conversationId:input.conversationId,
@@ -83,9 +82,10 @@ export async function queueConversationMessage(input:QueueConversationMessageInp
       routingDecisionId:routingDecision.id,
       providerSessionId:providerSession.id,
       ...(handoffCapsule?{handoffCapsuleId:handoffCapsule.id}:{})
-    });
+    };
+    const outboxEvent=await createOutboxEventWithClient(tx,{topic:"conversation-message",jobId:agentSession.id,payload:jobPayload});
 
-    return{userMessage,routingDecision,providerSession,handoffCapsule,agentSession,taskId};
+    return{userMessage,routingDecision,providerSession,handoffCapsule,agentSession,taskId,outboxEvent};
   });
 }
 

@@ -1,27 +1,27 @@
 import { randomUUID } from "node:crypto";
 import { NextRequest } from "next/server";
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { prisma, type ProviderAuthenticationStatus } from "@project-relay/database";
 import { createAssistantMessage, createConversation, handoffChecksum } from "@project-relay/database";
 import { CSRF_COOKIE, CSRF_HEADER } from "../../lib/csrf";
-
-const { queueAddMock } = vi.hoisted(() => ({ queueAddMock: vi.fn(async () => undefined) }));
-vi.mock("../../lib/redis", () => ({
-  getConversationMessageQueue: () => ({ add: queueAddMock }),
-}));
+import { LOCAL_SESSION_COOKIE } from "../../lib/local-auth-shared";
 
 import { POST as postMessage } from "./conversations/[id]/messages/route.js";
 
 const ORIGIN = "http://localhost:3300";
 const CSRF_TOKEN = "test-csrf-token";
+let sessionToken: string;
 
-function jsonRequest(url: string, options: { method?: string; body?: unknown; withCsrf?: boolean; origin?: string | null } = {}) {
+function jsonRequest(url: string, options: { method?: string; body?: unknown; withCsrf?: boolean; withSession?: boolean; origin?: string | null } = {}) {
   const headers = new Headers();
   headers.set("content-type", "application/json");
+  const cookies: string[] = [];
   if (options.withCsrf !== false) {
     headers.set(CSRF_HEADER, CSRF_TOKEN);
-    headers.set("cookie", `${CSRF_COOKIE}=${CSRF_TOKEN}`);
+    cookies.push(`${CSRF_COOKIE}=${CSRF_TOKEN}`);
   }
+  if (options.withSession !== false) cookies.push(`${LOCAL_SESSION_COOKIE}=${sessionToken}`);
+  if (cookies.length) headers.set("cookie", cookies.join("; "));
   if (options.origin !== null) headers.set("origin", options.origin ?? ORIGIN);
   return new NextRequest(url, {
     method: options.method ?? "POST",
@@ -44,7 +44,7 @@ async function healthyBoth() {
   await setProviderHealth("claude-cli", {});
 }
 
-function postJson(conversationId: string, body: unknown, options: { withCsrf?: boolean; origin?: string | null } = {}) {
+function postJson(conversationId: string, body: unknown, options: { withCsrf?: boolean; withSession?: boolean; origin?: string | null } = {}) {
   const request = jsonRequest(`${ORIGIN}/api/conversations/${conversationId}/messages`, { method: "POST", body, ...options });
   return postMessage(request, { params: Promise.resolve({ id: conversationId }) });
 }
@@ -62,6 +62,8 @@ describe("conversation message orchestration API", () => {
       },
     });
     projectId = project.id;
+    const session = await prisma.localSession.create({ data: { token: `test-session-${randomUUID()}` } });
+    sessionToken = session.token;
   });
 
   afterAll(async () => {
@@ -69,13 +71,7 @@ describe("conversation message orchestration API", () => {
   });
 
   beforeEach(async () => {
-    queueAddMock.mockReset();
-    queueAddMock.mockResolvedValue(undefined);
     await healthyBoth();
-  });
-
-  afterEach(async () => {
-    vi.clearAllMocks();
   });
 
   describe("explicit routing", () => {
@@ -298,24 +294,24 @@ describe("conversation message orchestration API", () => {
       const response = await postJson(conversation.id, { content: "hello", provider: "codex-cli", mode: "ASK" }, { origin: "https://evil.test" });
       expect(response.status).toBe(403);
     });
+
+    it("rejects a request without a valid local session even with a valid CSRF token", async () => {
+      const conversation = await createConversation(projectId, "Missing local session");
+      const response = await postJson(conversation.id, { content: "hello", provider: "codex-cli", mode: "ASK" }, { withSession: false });
+      expect(response.status).toBe(401);
+    });
   });
 
-  describe("transactional rollback", () => {
-    it("rolls back the entire orchestration when queue creation fails", async () => {
-      queueAddMock.mockRejectedValueOnce(new Error("forced queue failure"));
-      const conversation = await createConversation(projectId, "Rollback test");
-
-      const response = await postJson(conversation.id, { content: "should roll back", provider: "codex-cli", mode: "ASK" });
-      expect(response.status).toBe(500);
-
-      const messages = await prisma.conversationMessage.findMany({ where: { conversationId: conversation.id } });
-      expect(messages).toHaveLength(0);
-      const decisions = await prisma.routingDecision.findMany({ where: { conversationId: conversation.id } });
-      expect(decisions).toHaveLength(0);
-      const sessions = await prisma.providerSession.findMany({ where: { conversationId: conversation.id } });
-      expect(sessions).toHaveLength(0);
-      const capsules = await prisma.handoffCapsule.findMany({ where: { conversationId: conversation.id } });
-      expect(capsules).toHaveLength(0);
+  describe("durable queueing (outbox)", () => {
+    it("persists the full orchestration and a matching pending outbox event", async () => {
+      const conversation = await createConversation(projectId, "Outbox durability");
+      const response = await postJson(conversation.id, { content: "hello", provider: "codex-cli", mode: "ASK" });
+      expect(response.status).toBe(202);
+      const body = await response.json();
+      const outboxEvent = await prisma.outboxEvent.findUnique({ where: { jobId: body.queuedExecution.agentSessionId } });
+      expect(outboxEvent).not.toBeNull();
+      expect(outboxEvent?.status).toBe("PENDING");
+      expect(outboxEvent?.topic).toBe("conversation-message");
     });
   });
 });

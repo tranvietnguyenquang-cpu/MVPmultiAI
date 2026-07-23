@@ -47,7 +47,6 @@ describe("conversation execution-state API authorization", () => {
       reason: "test",
       providerHealthSnapshot: {},
       previousAssistantMessage: null,
-      queueAdd: async () => undefined
     });
 
     const request = new NextRequest(`${ORIGIN}/api/conversations/${conversation.id}/executions/${queued.agentSession.id}?projectId=${otherProjectId}`);
@@ -66,7 +65,6 @@ describe("conversation execution-state API authorization", () => {
       reason: "test",
       providerHealthSnapshot: {},
       previousAssistantMessage: null,
-      queueAdd: async () => undefined
     });
 
     const request = new NextRequest(`${ORIGIN}/api/conversations/${conversation.id}/executions/${queued.agentSession.id}`);
@@ -85,7 +83,6 @@ describe("conversation execution-state API authorization", () => {
       reason: "test",
       providerHealthSnapshot: {},
       previousAssistantMessage: null,
-      queueAdd: async () => undefined
     });
 
     const request = new NextRequest(`${ORIGIN}/api/conversations/${conversation.id}/executions/${queued.agentSession.id}?projectId=${projectId}`);

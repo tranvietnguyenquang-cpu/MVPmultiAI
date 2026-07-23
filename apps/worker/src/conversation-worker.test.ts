@@ -82,8 +82,7 @@ async function queueTestMessage(input: {
     selectedProviderId: input.selectedProviderId,
     reason: "test routing",
     providerHealthSnapshot: {},
-    previousAssistantMessage: input.previousAssistantMessage ?? null,
-    queueAdd: async () => undefined
+    previousAssistantMessage: input.previousAssistantMessage ?? null
   });
   const payload: ConversationMessageJob = {
     sessionId: result.agentSession.id,

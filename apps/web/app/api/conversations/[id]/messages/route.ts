@@ -9,8 +9,8 @@ import {
 } from "@project-relay/database";
 import { createConversationMessageSchema } from "@project-relay/shared";
 import { classifyRequest } from "../../../../../lib/csrf";
+import { requireLocalSession } from "../../../../../lib/local-auth";
 import { findAccessibleProject } from "../../../../../lib/project-access";
-import { getConversationMessageQueue } from "../../../../../lib/redis";
 
 export async function GET(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
@@ -73,6 +73,9 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   if (gate === "cross-origin") return NextResponse.json({ error: "Cross-origin requests are not permitted." }, { status: 403 });
   if (gate === "unauthenticated") return NextResponse.json({ error: "Missing or invalid CSRF token." }, { status: 401 });
 
+  const session = await requireLocalSession(request);
+  if (!session) return NextResponse.json({ error: "Local session required." }, { status: 401 });
+
   const { id: conversationId } = await params;
 
   const body = await request.json().catch(() => null);
@@ -109,9 +112,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       ...(parsed.data.provider !== "auto" ? { requestedProviderId: parsed.data.provider } : {}),
       reason: selection.reason,
       providerHealthSnapshot: health,
-      previousAssistantMessage,
-      queueAdd: payload =>
-        getConversationMessageQueue().add("route", payload, { jobId: payload.sessionId, removeOnComplete: 100, removeOnFail: 100 })
+      previousAssistantMessage
     });
 
     return NextResponse.json(
