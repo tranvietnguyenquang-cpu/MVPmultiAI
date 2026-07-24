@@ -6,7 +6,7 @@ services:
       POSTGRES_PASSWORD: projectrelay
       POSTGRES_DB: projectrelay
     ports:
-      - "5432:5432"
+      - "127.0.0.1:${PROJECT_RELAY_POSTGRES_PORT:-5434}:5432"
     volumes:
       - projectrelay-postgres:/var/lib/postgresql/data
     healthcheck:
@@ -17,7 +17,7 @@ services:
   redis:
     image: redis:7-alpine
     ports:
-      - "6379:6379"
+      - "127.0.0.1:${PROJECT_RELAY_REDIS_PORT:-6380}:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -25,4 +25,3 @@ services:
       retries: 10
 volumes:
   projectrelay-postgres:
-

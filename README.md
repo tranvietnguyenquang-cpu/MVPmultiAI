@@ -5,11 +5,10 @@ Local-first, evidence-based context continuity for AI coding sessions.
 ## Run locally
 
 1. Copy `.env.example` to `.env`.
-2. Start dependencies: `docker compose up -d`.
-3. Install and generate: `npm install && npm run db:generate`.
-4. Apply the migration: `npm run db:migrate`.
-5. Start web and worker: `npm run dev`.
-6. Open `http://localhost:3000`.
+2. Install and generate: `npm install && npm run db:generate`.
+3. Start both local services with `npm run dev:local` (or double-click `Start-MVPmultiAI.cmd`). The launcher starts Docker dependencies, deploys migrations, and owns only its web/worker process trees.
+4. Stop safely with `npm run stop:local` (or `Stop-MVPmultiAI.cmd`). Docker remains running by default.
+5. Open `http://localhost:3000`.
 
 Provider execution uses only locally installed CLI authentication. Verify Codex with `codex --version` and `codex login status`; verify Claude Code with `claude --version` and `claude auth status`. ProjectRelay never collects, copies, or stores provider passwords, tokens, cookies, credential paths, or environment values.
 
