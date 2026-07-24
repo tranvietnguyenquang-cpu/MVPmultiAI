@@ -72,12 +72,28 @@ export class ClaudeCliProvider extends CliProvider {
       "--disallowedTools",
       ...disallowedTools,
     ];
+    // Default (no explicit model selected) omits --model entirely, letting the CLI/account
+    // default apply. session.model is always the server-resolved registry value - never a
+    // raw browser string - and becomes exactly one argv element here, never concatenated
+    // into a shell string.
+    if (session.model) args.push("--model", session.model);
+    if (session.reasoningEffort) args.push("--effort", session.reasoningEffort);
     if (resume && session.externalId) {
       args.push("--resume", session.externalId);
     } else {
       args.push("--session-id", session.id);
     }
     return args;
+  }
+
+  protected modelProbeCommand(modelId: string, reasoningEffort?: string) {
+    const args = ["-p", "--output-format", "json", "--permission-mode", "dontAsk", "--allowedTools", "Read", "--disallowedTools", "Edit", "Write", "--model", modelId];
+    if (reasoningEffort) args.push("--effort", reasoningEffort);
+    return {
+      args,
+      prompt: "Reply with exactly MODEL_OK. Do not use tools or modify files.",
+      marker: "MODEL_OK",
+    };
   }
 
   protected streamParser() {

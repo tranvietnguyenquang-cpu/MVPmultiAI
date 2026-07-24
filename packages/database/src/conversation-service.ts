@@ -1,11 +1,11 @@
 import { createHash } from "node:crypto";
-import { getProviderModeCapability, resolveExecutionCapability, type ExecutionCapability } from "@project-relay/shared";
+import { getProviderModeCapability, isModelSupported, isReasoningEffortAllowed, resolveEffectiveModel, resolveExecutionCapability, type ExecutionCapability, type ModelSource as SharedModelSource } from "@project-relay/shared";
 import { Prisma, prisma } from "./index.js";
 import { createOutboxEventWithClient } from "./outbox-service.js";
 const HANDOFF_MAX_BYTES=32_768;
 function canonical(value:unknown):string{if(Array.isArray(value))return`[${value.map(canonical).join(",")}]`;if(value&&typeof value==="object")return`{${Object.entries(value as Record<string,unknown>).sort(([a],[b])=>a.localeCompare(b)).map(([key,item])=>`${JSON.stringify(key)}:${canonical(item)}`).join(",")}}`;return JSON.stringify(value);}
 export const handoffChecksum=(value:unknown)=>createHash("sha256").update(canonical(value)).digest("hex");
-type HandoffCapsuleInput={conversationId:string;fromProviderId:string;toProviderId:string;objective:string;relevantDecisions:object;filesChanged:object;gitBaseline:object;gitDiffSummary:string;tests:object;unresolvedIssues:object;acceptedFindings:object;sourceMessageRange:object};
+type HandoffCapsuleInput={conversationId:string;fromProviderId:string;toProviderId:string;fromModel?:string|null;toModel?:string|null;objective:string;relevantDecisions:object;filesChanged:object;gitBaseline:object;gitDiffSummary:string;tests:object;unresolvedIssues:object;acceptedFindings:object;sourceMessageRange:object};
 
 /** Handoff version is allocated via an atomic row-locked increment on the conversation, never by counting existing rows. */
 async function createHandoffCapsuleWithClient(client:Prisma.TransactionClient,input:HandoffCapsuleInput){
@@ -36,6 +36,41 @@ export async function findProjectTask(taskId:string,projectId:string){const task
 type ConversationMode="ASK"|"IMPLEMENT"|"REVIEW"|"CONTINUE"|"VERIFY";
 function agentSessionPurpose(mode:ConversationMode):"IMPLEMENTATION"|"REVIEW"|"VERIFICATION"{if(mode==="REVIEW")return"REVIEW";if(mode==="VERIFY")return"VERIFICATION";return"IMPLEMENTATION";}
 
+/**
+ * Resolves and validates the effective model/reasoning-effort for a queued execution
+ * through the documented priority chain (explicit selection -> project default ->
+ * application default -> provider CLI default), then rejects before any row is written
+ * if the resolved model doesn't belong to (or isn't enabled for) the selected provider,
+ * or the reasoning effort isn't one the resolved model actually accepts. `explicitModel`/
+ * `explicitReasoningEffort` are the raw, schema-bounded-but-not-yet-registry-validated
+ * browser values - never trusted directly for anything beyond this resolution.
+ */
+async function resolveModelSelection(tx:Prisma.TransactionClient,input:{providerId:string;projectId:string;explicitModel?:string|null|undefined;explicitReasoningEffort?:string|null|undefined}):Promise<{model:string|null;reasoningEffort:string|null;modelSource:SharedModelSource}>{
+  const [project,appSettings]=await Promise.all([
+    tx.project.findUniqueOrThrow({where:{id:input.projectId},select:{defaultClaudeModel:true,defaultCodexModel:true,defaultCodexReasoningEffort:true}}),
+    tx.applicationSettings.findUnique({where:{id:"singleton"}})
+  ]);
+  const isClaudeProvider=input.providerId==="claude-cli";
+  const projectDefaultModel=isClaudeProvider?project.defaultClaudeModel:project.defaultCodexModel;
+  const applicationDefaultModel=isClaudeProvider?appSettings?.defaultClaudeModel??null:appSettings?.defaultCodexModel??null;
+  const{model,modelSource}=resolveEffectiveModel({explicit:input.explicitModel,projectDefault:projectDefaultModel,applicationDefault:applicationDefaultModel});
+  // isModelSupported already implies "registered for this provider and enabled" - a model
+  // id that happens to be valid for the *other* provider fails this exactly the same way
+  // as one that is not registered anywhere, which is the correct outcome either way: it
+  // is not usable for this execution's selected provider.
+  if(model&&!isModelSupported(input.providerId,model))throw new Error(`${input.providerId} does not support model '${model}'.`);
+
+  // Reasoning effort follows the same priority chain, but only ever for Codex (Claude's
+  // registry entries carry no allowedReasoningEfforts, so any effort would already be
+  // rejected below) and only ever alongside an actual model selection.
+  const projectDefaultEffort=isClaudeProvider?null:project.defaultCodexReasoningEffort;
+  const applicationDefaultEffort=isClaudeProvider?null:appSettings?.defaultCodexReasoningEffort??null;
+  const reasoningEffort=input.explicitReasoningEffort??projectDefaultEffort??applicationDefaultEffort??null;
+  if(reasoningEffort&&!isReasoningEffortAllowed(input.providerId,model,reasoningEffort))throw new Error(`${input.providerId} model '${model??"default"}' does not support reasoning effort '${reasoningEffort}'.`);
+
+  return{model,reasoningEffort,modelSource};
+}
+
 export type QueueConversationMessageInput={
   conversationId:string;
   projectId:string;
@@ -44,6 +79,9 @@ export type QueueConversationMessageInput={
   taskId?:string;
   selectedProviderId:string;
   requestedProviderId?:string;
+  /** Raw browser-supplied model id/alias, or omitted/null for "Default". Schema-bounded but not yet registry-validated - see resolveModelSelection. */
+  requestedModel?:string|null;
+  requestedReasoningEffort?:string|null;
   reason:string;
   providerHealthSnapshot:Record<string,unknown>;
   previousAssistantMessage:{id:string;providerId:string|null}|null;
@@ -73,8 +111,27 @@ export async function queueConversationMessage(input:QueueConversationMessageInp
       return{duplicate:true as const,userMessage:existingMessage,routingDecision,providerSession,handoffCapsule,agentSession,taskId:agentSession.taskId,outboxEvent:null};
     }
 
-    const existingSession=await tx.providerSession.findFirst({where:{conversationId:input.conversationId,providerId:input.selectedProviderId,status:"RUNNING"},orderBy:{startedAt:"desc"}});
-    const providerSession=existingSession??await tx.providerSession.create({data:{conversationId:input.conversationId,providerId:input.selectedProviderId,status:"RUNNING",startedAt:new Date()}});
+    // Model resolution happens before any row is written: an unsupported model or
+    // reasoning effort must reject the whole submission before queueing, never partially.
+    const{model:effectiveModel,reasoningEffort:effectiveReasoningEffort,modelSource}=await resolveModelSelection(tx,{providerId:input.selectedProviderId,projectId:input.projectId,explicitModel:input.requestedModel,explicitReasoningEffort:input.requestedReasoningEffort});
+
+    // The most recent ProviderSession for this exact provider in this conversation
+    // (any status) - used both to decide reuse-eligibility below and, if the model
+    // differs, as the "from" side of a model-switch handoff.
+    const latestSessionForProvider=await tx.providerSession.findFirst({where:{conversationId:input.conversationId,providerId:input.selectedProviderId},orderBy:{startedAt:"desc"}});
+    // A session is only reuse-eligible if it is still RUNNING *and* pinned to the exact
+    // same model this request resolved to - continuing under a different model must
+    // never silently reuse an incompatible session (see resolvedModel on ProviderSession).
+    const existingSession=latestSessionForProvider&&latestSessionForProvider.status==="RUNNING"&&latestSessionForProvider.resolvedModel===effectiveModel
+      ?latestSessionForProvider
+      :null;
+    // A partial unique index enforces at most one RUNNING ProviderSession per
+    // (conversationId, providerId): a still-RUNNING session that isn't reuse-eligible
+    // (wrong model) must be retired before the new one can be created, not left dangling.
+    if(!existingSession&&latestSessionForProvider?.status==="RUNNING"){
+      await tx.providerSession.update({where:{id:latestSessionForProvider.id},data:{status:"COMPLETED",endedAt:new Date()}});
+    }
+    const providerSession=existingSession??await tx.providerSession.create({data:{conversationId:input.conversationId,providerId:input.selectedProviderId,status:"RUNNING",startedAt:new Date(),resolvedModel:effectiveModel,...(effectiveReasoningEffort?{reasoningEffort:effectiveReasoningEffort}:{})}});
 
     const taskId=input.taskId??(await tx.task.create({data:{projectId:input.projectId,title:input.content.slice(0,160)||"Conversation message",userRequest:input.content,objective:input.content.slice(0,2_000),relevantFiles:[],constraints:[],prohibitedChanges:[],assignedProvider:input.selectedProviderId}})).id;
 
@@ -87,22 +144,37 @@ export async function queueConversationMessage(input:QueueConversationMessageInp
     const capability=resolveExecutionCapability(input.selectedProviderId,input.mode,continuedCapability);
     if(!capability)throw new Error(`${input.selectedProviderId} does not support ${input.mode} execution.`);
 
+    // A per-execution snapshot of the CLI version active right now, so a historical
+    // execution keeps showing the version that actually ran it even after the CLI is
+    // later upgraded (ProviderHealth.version is live/mutable and would not preserve this).
+    const providerHealth=await tx.providerHealth.findUnique({where:{providerId:input.selectedProviderId},select:{version:true}});
+
     const purpose=agentSessionPurpose(input.mode);
-    const agentSession=await tx.agentSession.create({data:{projectId:input.projectId,taskId,providerId:input.selectedProviderId,state:"QUEUED",purpose,readOnly:purpose!=="IMPLEMENTATION",capability,providerSessionId:providerSession.id,conversationId:input.conversationId}});
+    const agentSession=await tx.agentSession.create({data:{projectId:input.projectId,taskId,providerId:input.selectedProviderId,state:"QUEUED",purpose,readOnly:purpose!=="IMPLEMENTATION",capability,requestedModel:effectiveModel,reasoningEffort:effectiveReasoningEffort,modelSource,providerVersion:providerHealth?.version??null,providerSessionId:providerSession.id,conversationId:input.conversationId}});
 
     const userMessage=await tx.conversationMessage.create({data:{conversationId:input.conversationId,role:"USER",mode:input.mode,content:input.content,status:"COMPLETED",idempotencyKey:input.idempotencyKey,...(input.taskId?{taskId:input.taskId}:{})}});
 
     await tx.agentSession.update({where:{id:agentSession.id},data:{userMessageId:userMessage.id}});
 
-    const routingDecision=await tx.routingDecision.create({data:{conversationId:input.conversationId,userMessageId:userMessage.id,selectedProviderId:input.selectedProviderId,reason:input.reason,providerHealthSnapshot:input.providerHealthSnapshot as Prisma.InputJsonValue,...(input.requestedProviderId?{requestedProviderId:input.requestedProviderId}:{})}});
+    const routingDecision=await tx.routingDecision.create({data:{conversationId:input.conversationId,userMessageId:userMessage.id,selectedProviderId:input.selectedProviderId,requestedModel:input.requestedModel??null,selectedModel:effectiveModel,reason:input.reason,providerHealthSnapshot:input.providerHealthSnapshot as Prisma.InputJsonValue,...(input.requestedProviderId?{requestedProviderId:input.requestedProviderId}:{})}});
 
     const previousProviderId=input.previousAssistantMessage?.providerId??null;
+    const providerChanged=Boolean(previousProviderId&&previousProviderId!==input.selectedProviderId);
+    // A model switch within the *same* provider (e.g. Sonnet -> Opus) is exactly as
+    // significant as a provider switch for handoff purposes: it is why providerSession
+    // reuse was refused above, and it deserves the same recorded trail.
+    const modelChangedWithinProvider=!providerChanged&&Boolean(latestSessionForProvider)&&latestSessionForProvider!.resolvedModel!==effectiveModel;
     let handoffCapsule:Awaited<ReturnType<typeof createHandoffCapsuleWithClient>>|null=null;
-    if(previousProviderId&&previousProviderId!==input.selectedProviderId){
+    if(providerChanged||modelChangedWithinProvider){
+      const previousProviderLatestSession=providerChanged
+        ?await tx.providerSession.findFirst({where:{conversationId:input.conversationId,providerId:previousProviderId!},orderBy:{startedAt:"desc"}})
+        :null;
       handoffCapsule=await createHandoffCapsuleWithClient(tx,{
         conversationId:input.conversationId,
-        fromProviderId:previousProviderId,
+        fromProviderId:previousProviderId??input.selectedProviderId,
         toProviderId:input.selectedProviderId,
+        fromModel:providerChanged?previousProviderLatestSession?.resolvedModel??null:latestSessionForProvider!.resolvedModel,
+        toModel:effectiveModel,
         objective:input.content.slice(0,2_000),
         relevantDecisions:{},
         filesChanged:{},
@@ -152,7 +224,23 @@ export async function retryConversationExecution(input:{executionId:string;provi
     if(!original.userMessage||!original.conversationId||!["FAILED","TIMED_OUT","CANCELLED"].includes(original.state))throw new Error("Execution is not retryable.");
     if(!getProviderModeCapability(input.providerId,original.userMessage.mode))throw new Error(`${input.providerId} does not support ${original.userMessage.mode} execution.`);
     const active=await tx.agentSession.findFirst({where:{conversationId:original.conversationId,userMessageId:original.userMessageId,providerId:input.providerId,state:{in:["QUEUED","STARTING","RUNNING"]}}});if(active)return active;
-    const ps=await tx.providerSession.findFirst({where:{conversationId:original.conversationId,providerId:input.providerId,status:"RUNNING"},orderBy:{startedAt:"desc"}})??await tx.providerSession.create({data:{conversationId:original.conversationId,providerId:input.providerId,status:"RUNNING",startedAt:new Date()}});
+    // A same-provider retry preserves the original model exactly (treated as the explicit
+    // selection, taking priority over project/application defaults, mirroring "resume
+    // preserves the original model"); a provider-switching retry re-resolves through the
+    // normal priority chain instead, since the original model may not even belong to the
+    // new provider.
+    const{model:effectiveModel,reasoningEffort:effectiveReasoningEffort,modelSource}=await resolveModelSelection(tx,{
+      providerId:input.providerId,
+      projectId:original.projectId,
+      explicitModel:input.providerId===original.providerId?original.requestedModel:undefined,
+      explicitReasoningEffort:input.providerId===original.providerId?original.reasoningEffort:undefined
+    });
+    const latestSessionForProvider=await tx.providerSession.findFirst({where:{conversationId:original.conversationId,providerId:input.providerId},orderBy:{startedAt:"desc"}});
+    const existingSession=latestSessionForProvider&&latestSessionForProvider.status==="RUNNING"&&latestSessionForProvider.resolvedModel===effectiveModel?latestSessionForProvider:null;
+    if(!existingSession&&latestSessionForProvider?.status==="RUNNING"){
+      await tx.providerSession.update({where:{id:latestSessionForProvider.id},data:{status:"COMPLETED",endedAt:new Date()}});
+    }
+    const ps=existingSession??await tx.providerSession.create({data:{conversationId:original.conversationId,providerId:input.providerId,status:"RUNNING",startedAt:new Date(),resolvedModel:effectiveModel,...(effectiveReasoningEffort?{reasoningEffort:effectiveReasoningEffort}:{})}});
     // Re-resolve rather than blindly copying original.capability: a retry can switch
     // provider (input.providerId vs original.providerId), so CONTINUE inheritance must
     // look at the target provider's own most recent execution, not the original's.
@@ -161,10 +249,16 @@ export async function retryConversationExecution(input:{executionId:string;provi
       :undefined;
     const capability=resolveExecutionCapability(input.providerId,original.userMessage.mode,continuedCapability);
     if(!capability)throw new Error(`${input.providerId} does not support ${original.userMessage.mode} execution.`);
-    const retry=await tx.agentSession.create({data:{projectId:original.projectId,taskId:original.taskId,providerId:input.providerId,state:"QUEUED",purpose:original.purpose,readOnly:original.readOnly,capability,providerSessionId:ps.id,conversationId:original.conversationId,userMessageId:original.userMessageId}});
-    const routing=await tx.routingDecision.create({data:{conversationId:original.conversationId,userMessageId:original.userMessageId,requestedProviderId:input.providerId,selectedProviderId:input.providerId,reason:"User-requested retry",providerHealthSnapshot:{retryOf:original.id,idempotencyKey:input.idempotencyKey}}});
+    const providerHealth=await tx.providerHealth.findUnique({where:{providerId:input.providerId},select:{version:true}});
+    const retry=await tx.agentSession.create({data:{projectId:original.projectId,taskId:original.taskId,providerId:input.providerId,state:"QUEUED",purpose:original.purpose,readOnly:original.readOnly,capability,requestedModel:effectiveModel,reasoningEffort:effectiveReasoningEffort,modelSource,providerVersion:providerHealth?.version??null,providerSessionId:ps.id,conversationId:original.conversationId,userMessageId:original.userMessageId}});
+    const routing=await tx.routingDecision.create({data:{conversationId:original.conversationId,userMessageId:original.userMessageId,requestedProviderId:input.providerId,selectedProviderId:input.providerId,requestedModel:effectiveModel,selectedModel:effectiveModel,reason:"User-requested retry",providerHealthSnapshot:{retryOf:original.id,idempotencyKey:input.idempotencyKey}}});
     const prior=await tx.conversationMessage.findFirst({where:{conversationId:original.conversationId,role:"ASSISTANT"},orderBy:{createdAt:"desc"}});
-    const handoff=prior?.providerId&&prior.providerId!==input.providerId?await createHandoffCapsuleWithClient(tx,{conversationId:original.conversationId,fromProviderId:prior.providerId,toProviderId:input.providerId,objective:original.userMessage.content.slice(0,2000),relevantDecisions:{},filesChanged:{},gitBaseline:{},gitDiffSummary:"",tests:{},unresolvedIssues:{},acceptedFindings:{},sourceMessageRange:{fromMessageId:prior.id,toMessageId:original.userMessageId!}}):null;
+    const priorProviderChanged=Boolean(prior?.providerId&&prior.providerId!==input.providerId);
+    const modelChangedWithinProvider=!priorProviderChanged&&Boolean(prior?.providerId)&&latestSessionForProvider?.resolvedModel!==effectiveModel;
+    const priorProviderLatestSession=priorProviderChanged
+      ?await tx.providerSession.findFirst({where:{conversationId:original.conversationId,providerId:prior!.providerId!},orderBy:{startedAt:"desc"}})
+      :null;
+    const handoff=prior?.providerId&&(priorProviderChanged||modelChangedWithinProvider)?await createHandoffCapsuleWithClient(tx,{conversationId:original.conversationId,fromProviderId:prior.providerId,toProviderId:input.providerId,fromModel:priorProviderChanged?priorProviderLatestSession?.resolvedModel??null:latestSessionForProvider!.resolvedModel,toModel:effectiveModel,objective:original.userMessage.content.slice(0,2000),relevantDecisions:{},filesChanged:{},gitBaseline:{},gitDiffSummary:"",tests:{},unresolvedIssues:{},acceptedFindings:{},sourceMessageRange:{fromMessageId:prior.id,toMessageId:original.userMessageId!}}):null;
     await createOutboxEventWithClient(tx,{topic:"conversation-message",jobId:retry.id,payload:{sessionId:retry.id,taskId:retry.taskId,conversationId:original.conversationId,messageId:original.userMessageId!,providerId:input.providerId,routingDecisionId:routing.id,providerSessionId:ps.id,...(handoff?{handoffCapsuleId:handoff.id}:{})}});
     return retry;
   });

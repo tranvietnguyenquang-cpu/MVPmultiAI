@@ -1,4 +1,4 @@
-import { describe,expect,it } from "vitest"; import { approximateTokens,canVerify,commandSpecSchema,compactReviewCapsule,criterionAcceptsEvidence,findLockedDecisionConflicts,getProviderModeCapability,listProviderModeCapabilities,resolveExecutionCapability } from "./index.js";
+import { describe,expect,it } from "vitest"; import { approximateTokens,canVerify,commandSpecSchema,compactReviewCapsule,criterionAcceptsEvidence,findLockedDecisionConflicts,getModelDefinition,getProviderModeCapability,isModelSupported,isReasoningEffortAllowed,listModelsForProvider,listProviderModeCapabilities,modelBelongsToProvider,resolveEffectiveModel,resolveExecutionCapability } from "./index.js";
 describe("provider/mode capability matrix",()=>{
   const expected:Record<string,"READ_ONLY"|"WORKSPACE_WRITE"|null>={
     "codex-cli:ASK":"READ_ONLY","codex-cli:REVIEW":"READ_ONLY","codex-cli:VERIFY":"READ_ONLY","codex-cli:CONTINUE":"READ_ONLY","codex-cli:IMPLEMENT":"WORKSPACE_WRITE",
@@ -33,6 +33,61 @@ describe("execution capability resolution (CONTINUE inheritance)",()=>{
   it("keeps Codex CONTINUE unchanged: always read-only regardless of the execution being continued",()=>{
     expect(resolveExecutionCapability("codex-cli","CONTINUE","WORKSPACE_WRITE")).toBe("READ_ONLY");
     expect(resolveExecutionCapability("codex-cli","CONTINUE",null)).toBe("READ_ONLY");
+  });
+});
+describe("model registry",()=>{
+  it("always lists Default as supported (absence of a model id)",()=>{
+    expect(isModelSupported("codex-cli",null)).toBe(true);
+    expect(isModelSupported("claude-cli",undefined)).toBe(true);
+  });
+  it("lists Claude's configured models",()=>{
+    const ids=listModelsForProvider("claude-cli").map(m=>m.modelId);
+    expect(ids).toEqual(expect.arrayContaining(["sonnet","opus"]));
+    for(const model of listModelsForProvider("claude-cli"))expect(model.enabled).toBe(true);
+  });
+  it("lists Codex's configured models with allowed reasoning efforts",()=>{
+    const models=listModelsForProvider("codex-cli");
+    expect(models.length).toBeGreaterThan(0);
+    for(const model of models)expect(model.allowedReasoningEfforts.length).toBeGreaterThan(0);
+  });
+  it("rejects a model id absent from the registry, before anything else can happen",()=>{
+    expect(isModelSupported("claude-cli","totally-not-a-real-model")).toBe(false);
+    expect(isModelSupported("codex-cli","gpt-4-turbo-not-configured")).toBe(false);
+  });
+  it("rejects a model that belongs to the other provider",()=>{
+    expect(modelBelongsToProvider("codex-cli","sonnet")).toBe(false);
+    expect(modelBelongsToProvider("claude-cli","o3")).toBe(false);
+    expect(modelBelongsToProvider("claude-cli","sonnet")).toBe(true);
+    expect(modelBelongsToProvider("codex-cli","o3")).toBe(true);
+  });
+  it("rejects an unknown provider outright",()=>{
+    expect(isModelSupported("gpt-4","sonnet")).toBe(false);
+    expect(getModelDefinition("gpt-4","sonnet")).toBeNull();
+  });
+  it("bounds reasoning effort by the configured model's own capability",()=>{
+    const codexModel=listModelsForProvider("codex-cli")[0]!;
+    expect(isReasoningEffortAllowed("codex-cli",codexModel.modelId,codexModel.allowedReasoningEfforts[0])).toBe(true);
+    expect(isReasoningEffortAllowed("codex-cli",codexModel.modelId,"not-a-real-effort-level")).toBe(false);
+    expect(isReasoningEffortAllowed("claude-cli","sonnet","high")).toBe(false);
+    expect(isReasoningEffortAllowed("codex-cli",null,"high")).toBe(false);
+  });
+  it("never requires a reasoning effort when none was requested",()=>{
+    expect(isReasoningEffortAllowed("codex-cli","o3",undefined)).toBe(true);
+    expect(isReasoningEffortAllowed("codex-cli",null,undefined)).toBe(true);
+  });
+});
+describe("effective model priority chain",()=>{
+  it("prefers the explicit execution selection above every other tier",()=>{
+    expect(resolveEffectiveModel({explicit:"opus",projectDefault:"sonnet",applicationDefault:"sonnet"})).toEqual({model:"opus",modelSource:"USER_SELECTED"});
+  });
+  it("falls back to the project default when nothing was explicitly selected",()=>{
+    expect(resolveEffectiveModel({projectDefault:"sonnet",applicationDefault:"opus"})).toEqual({model:"sonnet",modelSource:"PROJECT_DEFAULT"});
+  });
+  it("falls back to the application default when there is no project default",()=>{
+    expect(resolveEffectiveModel({applicationDefault:"opus"})).toEqual({model:"opus",modelSource:"SYSTEM_DEFAULT"});
+  });
+  it("falls all the way through to the provider's own CLI default when nothing is configured anywhere",()=>{
+    expect(resolveEffectiveModel({})).toEqual({model:null,modelSource:"PROVIDER_DEFAULT"});
   });
 });
 describe("verification gate",()=>{it("requires successful evidence for every criterion",()=>{expect(canVerify([{evidence:[{successful:true}]},{evidence:[]}])).toBe(false);expect(canVerify([{evidence:[{successful:true}]},{evidence:[{successful:true}]}])).toBe(true);expect(canVerify([])).toBe(false);});});

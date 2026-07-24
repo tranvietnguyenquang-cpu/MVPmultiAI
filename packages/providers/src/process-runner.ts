@@ -17,6 +17,8 @@ import type {
   CodingProvider,
   ConnectionTest,
   ExecutionCapability,
+  ModelAvailability,
+  ModelProbe,
   ProviderAuthentication,
   ProviderId,
   ProviderProbe,
@@ -68,6 +70,35 @@ export function classifyProviderProbe(
     return "NOT_AUTHENTICATED";
   }
   return result.error || code !== 0 ? "CLI_ERROR" : "UNKNOWN";
+}
+
+/**
+ * Classifies a model-validation probe's raw output. Deliberately mirrors
+ * classifyProviderProbe's pattern-matching style, but "model not found"-shaped text (e.g.
+ * Claude Code's own "There's an issue with the selected model ... may not exist or you may
+ * not have access to it" / `"error":"model_not_found"`) is checked first and produces a
+ * dedicated UNSUPPORTED classification distinct from a general auth/CLI failure - and
+ * AVAILABLE is only ever returned when the marker was actually observed on a clean exit,
+ * never assumed from the absence of an error.
+ */
+export function classifyModelProbe(
+  output: string,
+  code: number | null,
+  marker: string,
+  result: Pick<ProcessResult, "timedOut" | "cancelled" | "error">,
+): ModelAvailability {
+  const text = output.toLowerCase();
+  if (result.cancelled || result.timedOut) return "UNKNOWN";
+  if (/model_not_found|no (such|matching) model|(?:model|it) (?:may not exist|does not exist|is not (?:available|supported|recognized))|unknown model|invalid model|unsupported model/.test(text)) {
+    return "UNSUPPORTED";
+  }
+  if (/rate.?limit|too many requests|429/.test(text)) return "RATE_LIMITED";
+  if (/network|enotfound|econnrefused|timed out|offline/.test(text)) return "NETWORK_ERROR";
+  if (code === 0 && output.includes(marker)) return "AVAILABLE";
+  if (/not (logged|authenticated)|login|auth(?:entication)? required|unauthorized|forbidden|401/.test(text)) {
+    return "NOT_AUTHENTICATED";
+  }
+  return "UNKNOWN";
 }
 
 function resetAtFrom(output: string): Date | undefined {
@@ -278,6 +309,28 @@ export abstract class CliProvider implements CodingProvider {
     };
   }
 
+  /** Builds the harmless, read-only probe command for a specific model - mirrors authCommand() but also carries the model (and reasoning effort, if supported) under test. */
+  protected abstract modelProbeCommand(modelId: string, reasoningEffort?: string): { args: string[]; prompt: string; marker: string };
+
+  async probeModel(modelId: string, reasoningEffort?: string, signal?: AbortSignal): Promise<ModelProbe> {
+    const checkedAt = new Date();
+    const command = this.modelProbeCommand(modelId, reasoningEffort);
+    // Short timeout and a small output cap: this only ever needs to observe a one-word
+    // marker or a short rejection message, never a real task response. Uses the exact
+    // same executable resolver and SAFE_ENVIRONMENT (credential-stripped) as every other
+    // invocation, and never sets a workspace cwd, so it cannot modify any repository.
+    const result = await this.execute(command.args, command.prompt, signal, 20_000, 4_096);
+    const status: ModelAvailability = classifyModelProbe(result.output, result.code, command.marker, result);
+    return {
+      providerId: this.id,
+      modelId,
+      ...(reasoningEffort ? { reasoningEffort } : {}),
+      status,
+      ...(status !== "AVAILABLE" && result.output ? { reason: result.output.slice(0, 400).trim() } : {}),
+      checkedAt,
+    };
+  }
+
   protected supportsCapability(_capability: ExecutionCapability): boolean {
     return true;
   }
@@ -295,6 +348,8 @@ export abstract class CliProvider implements CodingProvider {
       role: input.role ?? this.defaultRoles[0]!,
       capability: input.capability,
       ...(input.resumeExternalId ? { externalId: input.resumeExternalId } : {}),
+      ...(input.model ? { model: input.model } : {}),
+      ...(input.reasoningEffort ? { reasoningEffort: input.reasoningEffort } : {}),
       ...(input.processLifecycle ? { processLifecycle: input.processLifecycle } : {}),
     };
     this.sessions.set(session.id, {
@@ -399,6 +454,7 @@ export abstract class CliProvider implements CodingProvider {
 
         const snapshot = accumulator.snapshot();
         if (snapshot.externalSessionId) session.externalId = snapshot.externalSessionId;
+        if (snapshot.resolvedModel) session.resolvedModel = snapshot.resolvedModel;
         if (snapshot.usage.inputTokens !== undefined || snapshot.usage.outputTokens !== undefined) {
           record.usage = snapshot.usage;
         } else {

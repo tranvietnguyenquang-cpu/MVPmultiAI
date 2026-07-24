@@ -58,6 +58,15 @@ export type AgentSessionInput = {
   capability: ExecutionCapability;
   role?: ProviderRole;
   resumeExternalId?: string;
+  /**
+   * Explicit model id/alias to pass to the CLI (e.g. "sonnet", "o3"). Absent means
+   * "Default": no --model flag is passed at all. Always the server-resolved value from
+   * the model registry (see @project-relay/shared getModelDefinition/isModelSupported) -
+   * never a raw, unvalidated browser string.
+   */
+  model?: string;
+  /** Passed only through each provider's own supported configuration mechanism (Claude: --effort; Codex: -c model_reasoning_effort=). */
+  reasoningEffort?: string;
   /** Worker-internal only; never populated from browser input or provider prompts. */
   processLifecycle?: ProviderProcessLifecycle;
 };
@@ -69,9 +78,29 @@ export type AgentSession = {
   taskId: string;
   role: ProviderRole;
   capability: ExecutionCapability;
+  model?: string;
+  reasoningEffort?: string;
+  /**
+   * The model the CLI's own structured stream actually reported using, once observed
+   * (see stream-parser.ts). Mutated in place as the run's `runSession` consumes the
+   * stream, mirroring how `externalId` is populated - stays undefined if the CLI never
+   * reports one.
+   */
+  resolvedModel?: string;
   externalId?: string;
   /** In-memory worker hook; it is intentionally never serialized to provider output. */
   processLifecycle?: ProviderProcessLifecycle;
+};
+
+/** Result of a safe, harmless model-validation probe. Never fabricated: AVAILABLE is only ever reported when the CLI's own output actually confirms the model responded successfully. */
+export type ModelAvailability = "AVAILABLE" | "UNSUPPORTED" | "NOT_AUTHENTICATED" | "RATE_LIMITED" | "NETWORK_ERROR" | "UNKNOWN";
+export type ModelProbe = {
+  providerId: ProviderId;
+  modelId: string;
+  reasoningEffort?: string;
+  status: ModelAvailability;
+  reason?: string;
+  checkedAt: Date;
 };
 
 export type AgentEvent = {
@@ -100,6 +129,13 @@ export interface CodingProvider {
   refreshHealth(): Promise<ProviderProbe>;
   probeAuthentication(signal?: AbortSignal): Promise<ProviderProbe>;
   testConnection(signal?: AbortSignal): Promise<ConnectionTest>;
+  /**
+   * Safe, harmless validation probe for a specific model: uses the same production
+   * executable resolver and SAFE_ENVIRONMENT as every other invocation, runs read-only
+   * with a short timeout, never modifies the repository, and never reads credentials
+   * beyond what the CLI's own auth already grants it.
+   */
+  probeModel(modelId: string, reasoningEffort?: string, signal?: AbortSignal): Promise<ModelProbe>;
   createSession(input: AgentSessionInput): Promise<AgentSession>;
   startSession(session: AgentSession, capsule: TaskCapsuleContent, signal?: AbortSignal): Promise<void>;
   sendTask(session: AgentSession, capsule: TaskCapsuleContent, signal?: AbortSignal): Promise<void>;

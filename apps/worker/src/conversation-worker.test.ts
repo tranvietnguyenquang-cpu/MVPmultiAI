@@ -18,6 +18,9 @@ type FakeProviderOverrides = Partial<{
   available: boolean;
   authentication: ProviderProbe["authentication"];
   externalId: string;
+  version: string;
+  /** Simulates the CLI's own structured stream reporting a resolved model, mirroring how the real process-runner.ts mutates session.resolvedModel while consuming the stream. Omit to simulate a provider (e.g. Codex) that never reports one in-band. */
+  resolvedModel: string;
   events: Array<{ type: "state" | "stdout" | "stderr" | "usage"; message: string }>;
   startSession: CodingProvider["startSession"];
   resumeSession: CodingProvider["resumeSession"];
@@ -28,13 +31,15 @@ type FakeProviderOverrides = Partial<{
 function makeFakeProvider(id: "codex-cli" | "claude-cli", overrides: FakeProviderOverrides = {}) {
   const events = overrides.events ?? [{ type: "stdout" as const, message: "ok" }];
   const capturedCapsules: TaskCapsuleContent[] = [];
-  const createSession = vi.fn(async (input: { workspace: string; taskId: string; capability: ProviderAgentSession["capability"]; role?: string; resumeExternalId?: string; processLifecycle?: ProviderAgentSession["processLifecycle"] }): Promise<ProviderAgentSession> => ({
+  const createSession = vi.fn(async (input: { workspace: string; taskId: string; capability: ProviderAgentSession["capability"]; role?: string; resumeExternalId?: string; model?: string; reasoningEffort?: string; processLifecycle?: ProviderAgentSession["processLifecycle"] }): Promise<ProviderAgentSession> => ({
     id: randomUUID(),
     providerId: id,
     workspace: input.workspace,
     taskId: input.taskId,
     role: (input.role as ProviderAgentSession["role"]) ?? "IMPLEMENTER",
     capability: input.capability,
+    ...(input.model ? { model: input.model } : {}),
+    ...(input.reasoningEffort ? { reasoningEffort: input.reasoningEffort } : {}),
     ...(overrides.externalId ? { externalId: overrides.externalId } : {}),
     ...(input.processLifecycle ? { processLifecycle: input.processLifecycle } : {})
   }));
@@ -44,6 +49,7 @@ function makeFakeProvider(id: "codex-cli" | "claude-cli", overrides: FakeProvide
       processStartIdentity: "2026-07-23T00:00:00.000Z",
       processStartedAt: new Date("2026-07-23T00:00:00.000Z"),
     });
+    if (overrides.resolvedModel) session.resolvedModel = overrides.resolvedModel;
     capturedCapsules.push(capsule);
   };
   const startSession = vi.fn(overrides.startSession ?? defaultStartSession);
@@ -64,6 +70,7 @@ function makeFakeProvider(id: "codex-cli" | "claude-cli", overrides: FakeProvide
       installed: true,
       authentication: overrides.authentication ?? "AUTHENTICATED",
       available: overrides.available ?? true,
+      ...(overrides.version ? { version: overrides.version } : {}),
       checkedAt: new Date(),
       quotaSource: "CLI_STATUS",
       quotaConfidence: "LOW",
@@ -76,7 +83,8 @@ function makeFakeProvider(id: "codex-cli" | "claude-cli", overrides: FakeProvide
     streamEvents,
     cancelSession: vi.fn(overrides.cancelSession ?? (async () => undefined)),
     resumeSession: vi.fn(overrides.resumeSession ?? overrides.startSession ?? defaultStartSession),
-    getUsage: vi.fn(async () => ({ estimated: true }))
+    getUsage: vi.fn(async () => ({ estimated: true })),
+    probeModel: vi.fn(async (modelId: string) => ({ providerId: id, modelId, status: "AVAILABLE" as const, checkedAt: new Date() }))
   };
   return { provider, capturedCapsules, createSession, startSession, resumeSession: provider.resumeSession as ReturnType<typeof vi.fn>, streamEvents };
 }
@@ -93,6 +101,8 @@ async function queueTestMessage(input: {
   content: string;
   mode?: "ASK" | "IMPLEMENT" | "REVIEW" | "CONTINUE" | "VERIFY";
   selectedProviderId: "codex-cli" | "claude-cli";
+  requestedModel?: string | null;
+  requestedReasoningEffort?: string | null;
   previousAssistantMessage?: { id: string; providerId: string | null } | null;
 }): Promise<{ result: FreshQueueResult; payload: ConversationMessageJob; job: Job<ConversationMessageJob> }> {
   const result = await queueConversationMessage({
@@ -101,6 +111,8 @@ async function queueTestMessage(input: {
     content: input.content,
     mode: input.mode ?? "ASK",
     selectedProviderId: input.selectedProviderId,
+    ...(input.requestedModel !== undefined ? { requestedModel: input.requestedModel } : {}),
+    ...(input.requestedReasoningEffort !== undefined ? { requestedReasoningEffort: input.requestedReasoningEffort } : {}),
     reason: "test routing",
     providerHealthSnapshot: {},
     previousAssistantMessage: input.previousAssistantMessage ?? null,
@@ -270,6 +282,69 @@ describe("conversation worker execution", () => {
     await processConversationMessage({ data: payload } as unknown as Job<ConversationMessageJob>, { registry: makeRegistry({ "claude-cli": fake.provider }) });
 
     expect(fake.createSession.mock.calls[0]?.[0]).toMatchObject({ capability: "READ_ONLY" });
+  });
+
+  it("passes the persisted requested model into provider.createSession, and persists the CLI-reported resolved model + CLI version on completion", async () => {
+    const conversation = await newConversation("Model wired into execution");
+    const fake = makeFakeProvider("claude-cli", { events: [{ type: "stdout", message: "ok" }], resolvedModel: "claude-opus-4-8", version: "2.1.218 (Claude Code)" });
+    const { payload, result } = await queueTestMessage({ conversationId: conversation.id, projectId, content: "hello", selectedProviderId: "claude-cli", requestedModel: "opus" });
+    expect(result.agentSession.requestedModel).toBe("opus");
+
+    await processConversationMessage({ data: payload } as unknown as Job<ConversationMessageJob>, { registry: makeRegistry({ "claude-cli": fake.provider }) });
+
+    expect(fake.createSession.mock.calls[0]?.[0]).toMatchObject({ model: "opus" });
+    const session = await prisma.agentSession.findUniqueOrThrow({ where: { id: payload.sessionId } });
+    expect(session.state).toBe("SUCCEEDED");
+    expect(session.requestedModel).toBe("opus");
+    expect(session.resolvedModel).toBe("claude-opus-4-8");
+    expect(session.resolvedAt).toBeTruthy();
+    expect(session.providerVersion).toBe("2.1.218 (Claude Code)");
+  });
+
+  it("omits the model argument entirely when Default was selected", async () => {
+    const conversation = await newConversation("Default model omits flag");
+    const fake = makeFakeProvider("claude-cli");
+    const { payload, result } = await queueTestMessage({ conversationId: conversation.id, projectId, content: "hello", selectedProviderId: "claude-cli" });
+    expect(result.agentSession.requestedModel).toBeNull();
+
+    await processConversationMessage({ data: payload } as unknown as Job<ConversationMessageJob>, { registry: makeRegistry({ "claude-cli": fake.provider }) });
+
+    expect(fake.createSession.mock.calls[0]?.[0]).not.toHaveProperty("model");
+  });
+
+  it("falls back to the requested model, with a visible event, when the CLI never reports a resolved model (Codex's exec --json protocol observed not to)", async () => {
+    const conversation = await newConversation("Missing resolved-model metadata");
+    // No `resolvedModel` override: simulates a CLI whose structured stream never carries one.
+    const fake = makeFakeProvider("codex-cli", { events: [{ type: "stdout", message: "ok" }] });
+    const { payload } = await queueTestMessage({ conversationId: conversation.id, projectId, content: "hello", selectedProviderId: "codex-cli", requestedModel: "o3" });
+
+    await processConversationMessage({ data: payload } as unknown as Job<ConversationMessageJob>, { registry: makeRegistry({ "codex-cli": fake.provider }) });
+
+    const session = await prisma.agentSession.findUniqueOrThrow({ where: { id: payload.sessionId } });
+    expect(session.state).toBe("SUCCEEDED");
+    expect(session.requestedModel).toBe("o3");
+    expect(session.resolvedModel).toBe("o3");
+    const events = await prisma.agentEvent.findMany({ where: { sessionId: payload.sessionId } });
+    expect(events.some(e => /did not report a resolved model/i.test(e.message))).toBe(true);
+  });
+
+  it("preserves the original model when resuming a provider session on a second turn", async () => {
+    const conversation = await newConversation("Resume preserves model");
+    const fake = makeFakeProvider("claude-cli", { externalId: "claude-thread-A", resolvedModel: "claude-opus-4-8" });
+    const registry = makeRegistry({ "claude-cli": fake.provider });
+
+    const turn1 = await queueTestMessage({ conversationId: conversation.id, projectId, content: "first", selectedProviderId: "claude-cli", requestedModel: "opus" });
+    await processConversationMessage({ data: turn1.payload } as unknown as Job<ConversationMessageJob>, { registry });
+
+    const afterTurn1 = await prisma.conversationMessage.findFirstOrThrow({ where: { conversationId: conversation.id, role: "ASSISTANT" } });
+    const turn2 = await queueTestMessage({
+      conversationId: conversation.id, projectId, content: "second", selectedProviderId: "claude-cli", requestedModel: "opus",
+      previousAssistantMessage: { id: afterTurn1.id, providerId: "claude-cli" }
+    });
+    expect(turn2.result.providerSession.id).toBe(turn1.result.providerSession.id);
+    await processConversationMessage({ data: turn2.payload } as unknown as Job<ConversationMessageJob>, { registry });
+
+    expect(fake.createSession.mock.calls[1]?.[0]).toMatchObject({ model: "opus", resumeExternalId: "claude-thread-A" });
   });
 
   it("rejects a request for an unhealthy Claude provider before ever invoking it", async () => {

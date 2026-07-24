@@ -118,6 +118,27 @@ enum OutboxEventStatus {
   FAILED
   DEAD_LETTER
 }
+/// How an execution's model was determined, in priority order from most to least specific.
+/// PROVIDER_DEFAULT means no override was applied anywhere in the chain - the CLI/account's
+/// own default model applies, and no --model flag is passed.
+enum ModelSource {
+  USER_SELECTED
+  PROJECT_DEFAULT
+  SYSTEM_DEFAULT
+  PROVIDER_DEFAULT
+}
+/// Result of a model-validation probe (see packages/providers probeModel). Distinct from
+/// ProviderAuthenticationStatus because "is this specific model usable" is a narrower
+/// question than "is this provider authenticated" - a provider can be AUTHENTICATED while
+/// a particular model is UNSUPPORTED for the account, or vice versa mid-outage.
+enum ModelAvailabilityStatus {
+  AVAILABLE
+  UNSUPPORTED
+  NOT_AUTHENTICATED
+  RATE_LIMITED
+  NETWORK_ERROR
+  UNKNOWN
+}
 
 model OutboxEvent {
   id          String @id @default(cuid())
@@ -149,6 +170,13 @@ model Project {
   name              String
   repositoryPath    String @unique
   defaultProvider   String @default("codex-cli")
+  /// Project-level model defaults (see packages/shared MODEL_REGISTRY). Null means "no
+  /// project override" - the application default (or provider CLI default) applies instead.
+  /// Never trusted as a raw browser-supplied model id; validated against the server-side
+  /// registry before being written here.
+  defaultClaudeModel String?
+  defaultCodexModel  String?
+  defaultCodexReasoningEffort String?
   allowedCommands   Json
   permittedPaths    Json
   /** Set only by the verification harness; never inferred from browser input. */
@@ -195,6 +223,12 @@ model ConversationMessage {
   providerId String?
   providerSessionId String?
   providerSession ProviderSession? @relation("MessageProviderSession",fields:[providerSessionId],references:[id],onDelete:SetNull)
+  /// Denormalized from the linked AgentSession at creation time (same pattern as
+  /// providerId/mode below) so the timeline UI can show requested/resolved model on every
+  /// assistant message without a join. See AgentSession.requestedModel/resolvedModel for
+  /// the authoritative per-execution record.
+  requestedModel String?
+  resolvedModel String?
   mode ConversationMode
   content String
   status ConversationMessageStatus @default(QUEUED)
@@ -218,6 +252,15 @@ model ProviderSession {
   conversation Conversation @relation(fields:[conversationId],references:[id],onDelete:Cascade)
   providerId String
   externalSessionId String?
+  /// The model this provider session is pinned to, set once at creation from the
+  /// server-resolved effective model (null means Default) and never changed afterward.
+  /// Continuing/resuming this session must request the same model; a different model
+  /// requires a new ProviderSession instead of silently reusing this one under an
+  /// incompatible model - see queueConversationMessage. Distinct from
+  /// AgentSession.resolvedModel, which is per-execution and reflects what the CLI's own
+  /// stream actually reported for that one turn.
+  resolvedModel String?
+  reasoningEffort String?
   status ProviderSessionStatus @default(QUEUED)
   startedAt DateTime?
   endedAt DateTime?
@@ -233,6 +276,10 @@ model HandoffCapsule {
   conversation Conversation @relation(fields:[conversationId],references:[id],onDelete:Cascade)
   fromProviderId String
   toProviderId String
+  /// Set only when this handoff was triggered (in whole or in part) by a model change
+  /// rather than a provider change - e.g. switching from Claude Sonnet to Claude Opus.
+  fromModel String?
+  toModel String?
   version Int
   objective String
   relevantDecisions Json
@@ -256,6 +303,8 @@ model RoutingDecision {
   userMessage ConversationMessage? @relation(fields:[userMessageId],references:[id],onDelete:Cascade)
   requestedProviderId String?
   selectedProviderId String
+  requestedModel String?
+  selectedModel String?
   reason String
   providerHealthSnapshot Json
   createdAt DateTime @default(now())
@@ -294,6 +343,38 @@ model ProviderHealthCheck {
   latencyMs      Int?
   createdAt      DateTime @default(now())
   @@index([providerId, createdAt])
+}
+
+/// Cached result of a safe, harmless model-validation probe (packages/providers
+/// probeModel), bounded to a TTL by `checkedAt` rather than trusted forever - see
+/// apps/worker/src/model-health.ts. `checkInProgress` mirrors ProviderHealth's
+/// dedup-in-flight pattern so a burst of UI requests never spawns concurrent probes for
+/// the same model.
+model ModelHealth {
+  providerId      String
+  modelId         String
+  reasoningEffort String?
+  status          ModelAvailabilityStatus @default(UNKNOWN)
+  /// Sanitized human-readable reason from the last probe - never a raw stack trace,
+  /// credential path, token, or full spawn argument list.
+  reason          String?
+  checkedAt       DateTime?
+  checkInProgress Boolean @default(false)
+  checkStartedAt  DateTime?
+  updatedAt       DateTime @updatedAt
+  @@id([providerId, modelId])
+}
+
+/// Single-row application-wide defaults (see also Project.defaultClaudeModel /
+/// defaultCodexModel / defaultCodexReasoningEffort for the project-level tier). Priority
+/// chain: explicit execution selection -> project default -> application default ->
+/// provider CLI default.
+model ApplicationSettings {
+  id                          String @id @default("singleton")
+  defaultClaudeModel          String?
+  defaultCodexModel           String?
+  defaultCodexReasoningEffort String?
+  updatedAt                   DateTime @updatedAt
 }
 
 model Task {
@@ -398,6 +479,22 @@ model AgentSession {
   /// it exactly rather than re-deriving it from the mode alone. Nullable only for rows
   /// created before this column existed.
   capability  String?
+  /// Model actually requested for this execution (server-resolved through the priority
+  /// chain: explicit selection -> project default -> application default -> provider CLI
+  /// default). Null means Default was used - no --model flag was passed.
+  requestedModel String?
+  /// Model the provider CLI actually reported using, extracted from its own structured
+  /// stream output where available (see packages/providers stream-parser.ts). May remain
+  /// null if the CLI never reports one (see failureCode PROVIDER_MODEL_METADATA_MISSING).
+  resolvedModel String?
+  reasoningEffort String?
+  modelSource ModelSource?
+  /// The provider CLI version active when this execution ran, captured at queue time -
+  /// a per-execution snapshot so historical executions keep showing the version that
+  /// actually ran them even after the CLI is later upgraded (ProviderHealth.version is
+  /// live/mutable and does not preserve this history on its own).
+  providerVersion String?
+  resolvedAt DateTime?
   providerSessionId String?
   providerSession ProviderSession? @relation(fields:[providerSessionId],references:[id],onDelete:SetNull)
   conversationId String?

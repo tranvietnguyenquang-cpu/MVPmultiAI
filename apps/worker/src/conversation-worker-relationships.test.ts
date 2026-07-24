@@ -39,7 +39,8 @@ function makeFakeProvider(id: "codex-cli" | "claude-cli") {
     streamEvents: async function* () { yield { type: "stdout" as const, message: "ok", timestamp: new Date() }; },
     cancelSession: vi.fn(async () => undefined),
     resumeSession: vi.fn(async () => undefined),
-    getUsage: vi.fn(async () => ({ estimated: true }))
+    getUsage: vi.fn(async () => ({ estimated: true })),
+    probeModel: vi.fn(async (modelId: string) => ({ providerId: id, modelId, status: "AVAILABLE" as const, checkedAt: new Date() }))
   };
   return { provider, createSession, startSession };
 }

@@ -15,6 +15,8 @@ export type ConversationMessageView = {
   content: string;
   status: "QUEUED" | "RUNNING" | "COMPLETED" | "CANCELLED" | "FAILED";
   handoffCapsuleId: string | null;
+  requestedModel?: string | null;
+  resolvedModel?: string | null;
   createdAt: string;
   routing?: { requestedProviderId: string | null; selectedProviderId: string };
 };
@@ -30,13 +32,24 @@ export type HandoffCapsuleView = {
   createdAt: string;
 };
 
-export type ProviderSessionView = { id: string; providerId: string; status: string };
+export type ProviderSessionView = { id: string; providerId: string; status: string; resolvedModel?: string | null };
 export type ProviderHealthView = { installed: boolean; authentication: string; available: boolean; version: string | null };
+export type ModelOptionView = {
+  modelId: string;
+  displayName: string;
+  enabled: boolean;
+  allowedReasoningEfforts: string[];
+  validation: { status: string; reason: string | null; checkedAt: string | null };
+};
 
 type ExecutionEventView = { id: string; type: string; stream: string | null; message: string; createdAt: string };
 type ExecutionStateResponse = {
   status: string;
   selectedProvider: string;
+  requestedModel: string | null;
+  resolvedModel: string | null;
+  reasoningEffort: string | null;
+  providerVersion: string | null;
   providerSession: ProviderSessionView | null;
   events: ExecutionEventView[];
   assistantMessage: ConversationMessageView | null;
@@ -57,6 +70,8 @@ const STATUS_LABELS: Record<string, string> = {
   TIMED_OUT: "TIMED OUT"
 };
 const PROVIDER_LABELS: Record<string, string> = { "codex-cli": "Codex", "claude-cli": "Claude" };
+/** Validation statuses that mean "a real probe actively found this unusable" - UNKNOWN (never probed) is deliberately not in this set, since absence of data is never treated as unavailable. */
+const UNAVAILABLE_VALIDATION_STATUSES = new Set(["UNSUPPORTED", "NOT_AUTHENTICATED", "RATE_LIMITED", "NETWORK_ERROR"]);
 
 function providerLabel(providerId: string | null): string {
   if (!providerId) return "—";
@@ -67,7 +82,11 @@ function formatTimestamp(value: string): string {
   return new Date(value).toLocaleString();
 }
 
-type PendingExecution = { id: string; status: string; events: ExecutionEventView[]; error: string | null; provider?: string; startedAt?: string; failureCode?: string | null };
+type PendingExecution = {
+  id: string; status: string; events: ExecutionEventView[]; error: string | null;
+  provider?: string; requestedModel?: string | null; resolvedModel?: string | null; providerVersion?: string | null;
+  startedAt?: string; failureCode?: string | null;
+};
 
 export function ConversationChat(props: {
   projectId: string;
@@ -80,11 +99,14 @@ export function ConversationChat(props: {
   initialActiveExecutionId: string | null;
 }) {
   const router = useRouter();
-  const { projectId, conversationId, messages, handoffCapsules, providerHealth } = props;
+  const { projectId, conversationId, messages, handoffCapsules, providerSessions, providerHealth } = props;
 
   const [content, setContent] = useState("");
   const [provider, setProvider] = useState<"auto" | "codex-cli" | "claude-cli">("auto");
   const [mode, setMode] = useState<"ASK" | "IMPLEMENT" | "REVIEW" | "CONTINUE" | "VERIFY">("ASK");
+  const [model, setModel] = useState(""); // "" means Default
+  const [reasoningEffort, setReasoningEffort] = useState(""); // "" means none selected
+  const [availableModels, setAvailableModels] = useState<ModelOptionView[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [composerError, setComposerError] = useState("");
   const [pending, setPending] = useState<PendingExecution | null>(
@@ -93,6 +115,30 @@ export function ConversationChat(props: {
   const timelineRef = useRef<HTMLDivElement>(null);
   const [now,setNow]=useState(Date.now());
   useEffect(()=>{if(!pending)return;const timer=setInterval(()=>setNow(Date.now()),1000);return()=>clearInterval(timer);},[pending?.id]);
+
+  // Changing provider refreshes the available model options and resets any model/effort
+  // selection made under the previous provider - a model id from one provider is never
+  // valid for the other.
+  useEffect(() => {
+    setModel("");
+    setReasoningEffort("");
+    if (provider === "auto") {
+      setAvailableModels([]);
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const response = await fetch(`/api/providers/${provider}/models`, { cache: "no-store" });
+        if (!response.ok || cancelled) return;
+        const data = await response.json() as { models?: ModelOptionView[] };
+        if (!cancelled) setAvailableModels(Array.isArray(data.models) ? data.models : []);
+      } catch {
+        // transient network error; the selector just falls back to Default-only
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [provider]);
 
   useEffect(() => {
     if (!pending) return;
@@ -104,7 +150,7 @@ export function ConversationChat(props: {
         if (!response.ok) return;
         const data = await response.json() as ExecutionStateResponse;
         if (cancelled) return;
-        setPending(prev => (prev ? { ...prev, status: data.status, events: data.events, error: data.error, provider:data.selectedProvider, startedAt:data.startedAt, failureCode:data.failureCode } : prev));
+        setPending(prev => (prev ? { ...prev, status: data.status, events: data.events, error: data.error, provider:data.selectedProvider, requestedModel:data.requestedModel, resolvedModel:data.resolvedModel, providerVersion:data.providerVersion, startedAt:data.startedAt, failureCode:data.failureCode } : prev));
         if (TERMINAL_STATES.has(data.status)) {
           setPending(null);
           router.refresh();
@@ -145,7 +191,7 @@ export function ConversationChat(props: {
       const response = await csrfFetch(`/api/conversations/${conversationId}/messages`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ content: trimmed, provider, mode, idempotencyKey })
+        body: JSON.stringify({ content: trimmed, provider, mode, ...(model ? { model } : {}), ...(reasoningEffort ? { reasoningEffort } : {}), idempotencyKey })
       });
       const data = await response.json() as { queuedExecution?: { agentSessionId: string }; error?: string };
       if (!response.ok) throw new Error(data.error ?? "Could not send message.");
@@ -165,8 +211,19 @@ export function ConversationChat(props: {
   // queued execution - this only drives Send-button state and the safety label below.
   const explicitCapability = provider !== "auto" ? getProviderModeCapability(provider, mode) : null;
   const unsupportedPair = provider !== "auto" && !explicitCapability;
-  const sendDisabled = busy || unsupportedPair;
+  const selectedModelDef = availableModels.find(item => item.modelId === model);
+  const modelUnavailable = Boolean(model) && selectedModelDef ? UNAVAILABLE_VALIDATION_STATUSES.has(selectedModelDef.validation.status) : false;
+  const sendDisabled = busy || unsupportedPair || modelUnavailable;
   const workspaceWriteWarning = provider === "claude-cli" && explicitCapability === "WORKSPACE_WRITE";
+  const safetyModelLabel = model && selectedModelDef ? selectedModelDef.displayName : "Claude";
+  const showReasoningEffort = Boolean(selectedModelDef?.allowedReasoningEfforts.length);
+  // A prior execution against this exact provider in this conversation is already pinned
+  // to a model; selecting a different one here will not resume it - a new provider session
+  // starts instead (see ProviderSession.resolvedModel / queueConversationMessage).
+  const sessionsForProvider = provider !== "auto" ? providerSessions.filter(session => session.providerId === provider) : [];
+  const pinnedModel = sessionsForProvider.at(-1)?.resolvedModel ?? null;
+  const modelChangeStartsNewSession = sessionsForProvider.length > 0 && pinnedModel !== (model || null);
+
   async function cancelExecution(){if(!pending)return;await csrfFetch(`/api/conversations/${conversationId}/executions/${pending.id}/cancel?projectId=${projectId}`,{method:"POST"});setPending(null);router.refresh();}
   async function retryExecution(executionId:string,providerId:string){setComposerError("");const response=await csrfFetch(`/api/conversations/${conversationId}/executions/${executionId}/retry`,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({projectId,provider:"same",idempotencyKey:crypto.randomUUID()})});const data=await response.json()as{executionId?:string;error?:string};if(!response.ok){setComposerError(data.error??"Retry failed.");return;}setPending({id:data.executionId!,status:"QUEUED",events:[],error:null,provider:providerId});router.refresh();}
 
@@ -189,7 +246,7 @@ export function ConversationChat(props: {
               <div className="row" key={id}>
                 <div>
                   <h3>{providerLabel(id)}</h3>
-                  <div className="mono subtle">{health?.version ?? "version unknown"}</div>
+                  <div className="mono subtle">CLI version: {health?.version ?? "unknown"}</div>
                 </div>
                 <span className={`pill ${healthy ? "good" : "warn"}`}>{label}</span>
               </div>
@@ -219,7 +276,8 @@ export function ConversationChat(props: {
                       .join("")
                   : "Waiting for the worker to pick up this execution…"}
               </div>
-              <p className="subtle">Provider: {providerLabel(pending.provider??provider)} · Elapsed: {pending.startedAt?Math.floor((now-new Date(pending.startedAt).getTime())/1000):0}s · Last activity: {pending.events.at(-1)?.createdAt?Math.floor((now-new Date(pending.events.at(-1)!.createdAt).getTime())/1000):0}s ago · inactivity 5m · maximum duration varies by mode</p>
+              <p className="subtle">Provider: {providerLabel(pending.provider??provider)} · Model: {pending.resolvedModel ?? pending.requestedModel ?? "Default"} · Elapsed: {pending.startedAt?Math.floor((now-new Date(pending.startedAt).getTime())/1000):0}s · Last activity: {pending.events.at(-1)?.createdAt?Math.floor((now-new Date(pending.events.at(-1)!.createdAt).getTime())/1000):0}s ago · inactivity 5m · maximum duration varies by mode</p>
+              {pending.providerVersion && <p className="subtle mono">CLI version: {pending.providerVersion}</p>}
               <button className="button secondary" onClick={cancelExecution}>Cancel</button>
               {pending.error&&<p className="warn">{pending.error}</p>}
             </div>
@@ -260,8 +318,39 @@ export function ConversationChat(props: {
               </select>
             </label>
           </div>
-          {workspaceWriteWarning && <p className="warn">Claude may modify files in the registered repository.</p>}
+          <div className="two">
+            <label>
+              Model
+              <select value={model} onChange={event => setModel(event.target.value)} disabled={busy || provider === "auto"}>
+                <option value="">Default</option>
+                {availableModels.map(item => (
+                  <option
+                    key={item.modelId}
+                    value={item.modelId}
+                    disabled={!item.enabled || UNAVAILABLE_VALIDATION_STATUSES.has(item.validation.status)}
+                    title={item.validation.reason ?? undefined}
+                  >
+                    {item.displayName}{UNAVAILABLE_VALIDATION_STATUSES.has(item.validation.status) ? ` (unavailable: ${item.validation.reason ?? item.validation.status})` : ""}
+                  </option>
+                ))}
+              </select>
+            </label>
+            {showReasoningEffort && (
+              <label>
+                Reasoning effort
+                <select value={reasoningEffort} onChange={event => setReasoningEffort(event.target.value)} disabled={busy}>
+                  <option value="">Default</option>
+                  {selectedModelDef!.allowedReasoningEfforts.map(effort => (
+                    <option key={effort} value={effort}>{effort}</option>
+                  ))}
+                </select>
+              </label>
+            )}
+          </div>
+          {workspaceWriteWarning && <p className="warn">{safetyModelLabel} may modify files in the registered repository.</p>}
+          {modelChangeStartsNewSession && <p className="subtle">Changing the model here will start a new {providerLabel(provider)} provider session rather than continuing the current one.</p>}
           {unsupportedPair && <p className="warn">{provider} does not support {mode} execution.</p>}
+          {modelUnavailable && selectedModelDef && <p className="warn">{selectedModelDef.displayName} is unavailable{selectedModelDef.validation.reason ? `: ${selectedModelDef.validation.reason}` : "."}</p>}
           {composerError && <p className="warn">{composerError}</p>}
           <button disabled={sendDisabled}>{pending ? "Execution in progress…" : submitting ? "Sending…" : "Send"}</button>
         </form>
@@ -274,12 +363,14 @@ function MessageBubble({ message, handoffCapsules,canRetry,onRetry }: { message:
   const isUser = message.role === "USER";
   const roleClass = isUser ? "user" : `assistant-${message.providerId ?? "unknown"}`;
   const handoff = message.handoffCapsuleId ? handoffCapsules.find(item => item.id === message.handoffCapsuleId) : undefined;
+  const displayModel = message.resolvedModel ?? message.requestedModel ?? null;
 
   return (
     <div className={`msg ${roleClass} card`}>
       <div className="row">
         <div className="row" style={{ gap: 8 }}>
           {isUser ? <span className="pill">USER</span> : <span className={`badge ${message.providerId ?? ""}`}>{providerLabel(message.providerId)}</span>}
+          {!isUser && displayModel && <span className="pill">{displayModel}</span>}
           <span className="pill">{message.mode}</span>
           {message.routing && !message.routing.requestedProviderId && (
             <span className="pill">{`Auto → ${providerLabel(message.routing.selectedProviderId)}`}</span>
@@ -315,6 +406,8 @@ function MessageBubble({ message, handoffCapsules,canRetry,onRetry }: { message:
           {message.providerSessionId && <><br />provider session {message.providerSessionId}</>}
           {message.agentSessionId && <><br />execution {message.agentSessionId}</>}
           {message.taskId && <><br />task {message.taskId}</>}
+          {!isUser && message.requestedModel && <><br />requested model {message.requestedModel}</>}
+          {!isUser && message.resolvedModel && <><br />resolved model {message.resolvedModel}</>}
         </div>
       </details>
     </div>

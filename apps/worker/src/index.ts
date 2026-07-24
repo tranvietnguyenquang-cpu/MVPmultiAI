@@ -9,6 +9,7 @@ import { pollCancellation } from "./cancellation.js";
 import { processConversationMessage } from "./conversation-worker.js";
 import { parseReviewFindings } from "./review-findings.js";
 import { providerHealthMonitor, type ProviderHealthMode } from "./provider-health.js";
+import { modelHealthMonitor } from "./model-health.js";
 import { claimAgentSession, DEFAULT_LEASE_MS, newWorkerId, reapExpiredAgentSessions, releasedLeaseFields, startHeartbeat } from "./worker-lease.js";
 
 const WORKER_ID = newWorkerId();
@@ -65,7 +66,9 @@ const reapTimer=setInterval(()=>void reapExpiredAgentSessions().catch(error=>con
 const worker=new Worker<SessionJob>("agent-sessions",processSession,{connection,concurrency:1});
 const conversationWorker=new Worker<ConversationMessageJob>("conversation-messages",job=>processConversationMessage(job,{workerId:WORKER_ID}),{connection,concurrency:1});
 const providerHealthWorker=new Worker<{providerId:"codex-cli"|"claude-cli";mode:ProviderHealthMode}>("provider-health",async job=>providerHealthMonitor.probe(job.data.providerId,job.data.mode,true),{connection,concurrency:1});
+const modelHealthWorker=new Worker<{providerId:"codex-cli"|"claude-cli";modelId:string;reasoningEffort?:string}>("model-health",async job=>modelHealthMonitor.probe(job.data.providerId,job.data.modelId,job.data.reasoningEffort,true),{connection,concurrency:1});
 void providerHealthMonitor.startup();const refreshTimer=setInterval(()=>void providerHealthMonitor.refreshAll(),5*60_000);const authTimer=setInterval(()=>void providerHealthMonitor.authenticateAll(),15*60_000);refreshTimer.unref();authTimer.unref();
+void modelHealthMonitor.startup();
 worker.on("failed",async(job,error)=>{if(job){const state=await prisma.agentSession.findUnique({where:{id:job.data.sessionId},select:{state:true}});if(state&&!terminalStates.includes(state.state as typeof terminalStates[number]))await prisma.agentSession.update({where:{id:job.data.sessionId},data:{state:"FAILED",endedAt:new Date(),error:error.message,...releasedLeaseFields}});}});
 conversationWorker.on("failed",async(job,error)=>{if(job){const state=await prisma.agentSession.findUnique({where:{id:job.data.sessionId},select:{state:true}});if(state&&!terminalStates.includes(state.state as typeof terminalStates[number]))await prisma.agentSession.update({where:{id:job.data.sessionId},data:{state:"FAILED",endedAt:new Date(),error:error.message,...releasedLeaseFields}});}});
 
@@ -78,4 +81,4 @@ await recoverStuckOutboxEvents();
 const outboxTimer=setInterval(()=>void dispatchPendingOutboxEvents(publishOutboxEvent).catch(error=>console.error("Outbox dispatch failed:",error)),1_000);
 outboxTimer.unref();
 
-console.log("ProjectRelay worker listening for agent-sessions, conversation-messages, and provider-health jobs.");async function shutdown(){clearInterval(refreshTimer);clearInterval(authTimer);clearInterval(outboxTimer);clearInterval(reapTimer);await worker.close();await conversationWorker.close();await providerHealthWorker.close();await conversationMessageQueue.close();await prisma.$disconnect();process.exit(0);}process.on("SIGINT",()=>void shutdown());process.on("SIGTERM",()=>void shutdown());
+console.log("ProjectRelay worker listening for agent-sessions, conversation-messages, provider-health, and model-health jobs.");async function shutdown(){clearInterval(refreshTimer);clearInterval(authTimer);clearInterval(outboxTimer);clearInterval(reapTimer);await worker.close();await conversationWorker.close();await providerHealthWorker.close();await modelHealthWorker.close();await conversationMessageQueue.close();await prisma.$disconnect();process.exit(0);}process.on("SIGINT",()=>void shutdown());process.on("SIGTERM",()=>void shutdown());

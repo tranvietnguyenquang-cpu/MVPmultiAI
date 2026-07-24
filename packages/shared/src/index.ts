@@ -26,7 +26,17 @@ export const createConversationMessageSchema = z.object({
   provider: z.enum(["codex-cli", "claude-cli", "auto"]),
   mode: z.enum(["ASK", "IMPLEMENT", "REVIEW", "CONTINUE", "VERIFY"]),
   taskId: z.string().min(1).optional(),
-  idempotencyKey: z.string().trim().min(1).max(200).optional()
+  idempotencyKey: z.string().trim().min(1).max(200).optional(),
+  /**
+   * Raw browser-supplied model id/alias, or omitted for "Default". This is bounded to a
+   * plausible length here but is NEVER trusted as a real CLI flag on its own: the server
+   * always re-validates it against MODEL_REGISTRY (see getModelDefinition/isModelSupported
+   * below) before it can influence a spawned process, and it only ever becomes a single
+   * argv array element - never shell-concatenated - so it cannot inject additional flags
+   * even if validation were somehow bypassed.
+   */
+  model: z.string().trim().min(1).max(200).optional(),
+  reasoningEffort: z.string().trim().min(1).max(50).optional()
 });
 
 export const acceptanceCriterionInputSchema = z.object({
@@ -108,6 +118,98 @@ export function listProviderModeCapabilities(): Array<{ providerId: "codex-cli" 
   const providers = ["codex-cli", "claude-cli"] as const;
   const modes = ["ASK", "IMPLEMENT", "REVIEW", "CONTINUE", "VERIFY"] as const;
   return providers.flatMap(providerId => modes.map(mode => ({ providerId, mode, capability: getProviderModeCapability(providerId, mode) })));
+}
+
+/**
+ * How an execution's model was determined, in priority order from most to least
+ * specific. PROVIDER_DEFAULT means no override applied anywhere in the chain - the
+ * CLI/account's own default model is used, and no --model flag is passed at all.
+ */
+export type ModelSource = "USER_SELECTED" | "PROJECT_DEFAULT" | "SYSTEM_DEFAULT" | "PROVIDER_DEFAULT";
+export type ProviderId = "codex-cli" | "claude-cli";
+
+export type ModelDefinition = {
+  providerId: ProviderId;
+  /** The exact string passed to the CLI's --model/-m flag. "Default" is never a registry entry - it is represented by the absence of a selection. */
+  modelId: string;
+  displayName: string;
+  /** Whether this entry is offered as a selectable option at all. Independent of - and not a substitute for - the live ModelHealth probe, which reflects whether it actually works for *this* account right now. */
+  enabled: boolean;
+  supportedModes: ConversationModeValue[];
+  /** Reasoning-effort values this model accepts, passed only through the provider's own supported configuration mechanism (Claude: --effort; Codex: -c model_reasoning_effort=). Empty means the reasoning-effort selector never shows for this model. */
+  allowedReasoningEfforts: string[];
+};
+
+const ALL_MODES: ConversationModeValue[] = ["ASK", "IMPLEMENT", "REVIEW", "CONTINUE", "VERIFY"];
+/** Documented Codex CLI `model_reasoning_effort` config values (see `codex exec -c model_reasoning_effort=<value>`). */
+const CODEX_REASONING_EFFORTS = ["minimal", "low", "medium", "high"];
+
+/**
+ * The authoritative, server-controlled model registry (see also claude-cli-provider.ts /
+ * codex-cli-provider.ts for how each entry's modelId becomes a CLI argument). Configured
+ * here rather than accepted from the browser: a request naming a model absent from this
+ * list is rejected before queueing (see isModelSupported), regardless of what string a
+ * client sends. `enabled: true` means "offered as an option" - it is deliberately not a
+ * claim that the model is available to every account; actual per-account availability is
+ * determined separately by the ModelHealth validation probe.
+ */
+export const MODEL_REGISTRY: Record<ProviderId, ModelDefinition[]> = {
+  "claude-cli": [
+    { providerId: "claude-cli", modelId: "sonnet", displayName: "Claude Sonnet", enabled: true, supportedModes: ALL_MODES, allowedReasoningEfforts: [] },
+    { providerId: "claude-cli", modelId: "opus", displayName: "Claude Opus", enabled: true, supportedModes: ALL_MODES, allowedReasoningEfforts: [] }
+  ],
+  "codex-cli": [
+    { providerId: "codex-cli", modelId: "o3", displayName: "Codex o3", enabled: true, supportedModes: ALL_MODES, allowedReasoningEfforts: CODEX_REASONING_EFFORTS },
+    { providerId: "codex-cli", modelId: "gpt-5-codex", displayName: "Codex (GPT-5-Codex)", enabled: true, supportedModes: ALL_MODES, allowedReasoningEfforts: CODEX_REASONING_EFFORTS }
+  ]
+};
+
+/** Returns null for a model absent from the registry, disabled, or (when a mode is given) not supported in that mode. */
+export function getModelDefinition(providerId: string, modelId: string): ModelDefinition | null {
+  return (MODEL_REGISTRY[providerId as ProviderId] ?? []).find(entry => entry.modelId === modelId) ?? null;
+}
+
+export function listModelsForProvider(providerId: string): ModelDefinition[] {
+  return MODEL_REGISTRY[providerId as ProviderId] ?? [];
+}
+
+/** "Default" (modelId null/undefined) is always supported; any other id must be an enabled registry entry that supports the requested mode. */
+export function isModelSupported(providerId: string, modelId: string | null | undefined, mode?: string): boolean {
+  if (!modelId) return true;
+  const definition = getModelDefinition(providerId, modelId);
+  if (!definition || !definition.enabled) return false;
+  return !mode || definition.supportedModes.includes(mode as ConversationModeValue);
+}
+
+/** A model belongs to the provider that registered it; this rejects a modelId that happens to be valid for the *other* provider. */
+export function modelBelongsToProvider(providerId: string, modelId: string): boolean {
+  return getModelDefinition(providerId, modelId) !== null;
+}
+
+export function isReasoningEffortAllowed(providerId: string, modelId: string | null | undefined, effort: string | null | undefined): boolean {
+  if (!effort) return true;
+  if (!modelId) return false;
+  const definition = getModelDefinition(providerId, modelId);
+  return Boolean(definition?.allowedReasoningEfforts.includes(effort));
+}
+
+/**
+ * Resolves the effective model for a queued execution through the documented priority
+ * chain: explicit execution selection -> project default -> application default ->
+ * provider CLI default (i.e. no override at all, model stays null). `explicit` should be
+ * the browser's raw requested model (already schema-bounded, not yet registry-validated -
+ * callers must still check isModelSupported/modelBelongsToProvider before trusting the
+ * result for a spawn).
+ */
+export function resolveEffectiveModel(input: {
+  explicit?: string | null | undefined;
+  projectDefault?: string | null | undefined;
+  applicationDefault?: string | null | undefined;
+}): { model: string | null; modelSource: ModelSource } {
+  if (input.explicit) return { model: input.explicit, modelSource: "USER_SELECTED" };
+  if (input.projectDefault) return { model: input.projectDefault, modelSource: "PROJECT_DEFAULT" };
+  if (input.applicationDefault) return { model: input.applicationDefault, modelSource: "SYSTEM_DEFAULT" };
+  return { model: null, modelSource: "PROVIDER_DEFAULT" };
 }
 
 export const sessionJobSchema = z.object({ sessionId: z.string(), taskId: z.string(), capsuleId: z.string() });

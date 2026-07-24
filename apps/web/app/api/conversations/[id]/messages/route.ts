@@ -122,6 +122,11 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       ...(parsed.data.taskId ? { taskId: parsed.data.taskId } : {}),
       selectedProviderId: selection.providerId,
       ...(parsed.data.provider !== "auto" ? { requestedProviderId: parsed.data.provider } : {}),
+      // Raw, schema-bounded browser values only - queueConversationMessage independently
+      // re-validates against the server-side model registry before either can influence
+      // anything spawned; the browser can never inject an arbitrary flag through them.
+      ...(parsed.data.model !== undefined ? { requestedModel: parsed.data.model } : {}),
+      ...(parsed.data.reasoningEffort !== undefined ? { requestedReasoningEffort: parsed.data.reasoningEffort } : {}),
       reason: selection.reason,
       providerHealthSnapshot: health,
       previousAssistantMessage,

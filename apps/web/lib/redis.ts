@@ -19,8 +19,10 @@ const prefix = process.env.PROJECT_RELAY_QUEUE_PREFIX;
 const queueOptions = prefix ? { connection, prefix } : { connection };
 let sessionQueue: Queue<SessionJob, void, "run"> | undefined;
 let providerHealthQueue: Queue<{providerId:"codex-cli"|"claude-cli";mode:"refresh"|"auth"},void,"check">|undefined;
+let modelHealthQueue: Queue<{providerId:"codex-cli"|"claude-cli";modelId:string;reasoningEffort?:string},void,"check">|undefined;
 export function getSessionQueue(): Queue<SessionJob, void, "run"> {
   if (!sessionQueue) sessionQueue = new Queue<SessionJob, void, "run">("agent-sessions", queueOptions);
   return sessionQueue;
 }
 export function getProviderHealthQueue(){if(!providerHealthQueue)providerHealthQueue=new Queue("provider-health",queueOptions);return providerHealthQueue;}
+export function getModelHealthQueue(){if(!modelHealthQueue)modelHealthQueue=new Queue("model-health",queueOptions);return modelHealthQueue;}

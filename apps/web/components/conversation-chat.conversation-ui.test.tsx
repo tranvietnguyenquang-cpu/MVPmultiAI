@@ -280,4 +280,127 @@ describe("ConversationChat", () => {
     await vi.advanceTimersByTimeAsync(10_000);
     expect(fetchMock.mock.calls.length).toBe(callsAfterSettling);
   });
+
+  describe("model selection", () => {
+    const CLAUDE_MODELS = [
+      { modelId: "sonnet", displayName: "Claude Sonnet", enabled: true, allowedReasoningEfforts: [], validation: { status: "AVAILABLE", reason: null, checkedAt: null } },
+      { modelId: "opus", displayName: "Claude Opus", enabled: true, allowedReasoningEfforts: [], validation: { status: "AVAILABLE", reason: null, checkedAt: null } },
+      { modelId: "claude-legacy", displayName: "Claude Legacy", enabled: true, allowedReasoningEfforts: [], validation: { status: "UNSUPPORTED", reason: "model not found", checkedAt: null } },
+    ];
+    const CODEX_MODELS = [
+      { modelId: "o3", displayName: "Codex o3", enabled: true, allowedReasoningEfforts: ["low", "medium", "high"], validation: { status: "UNKNOWN", reason: null, checkedAt: null } },
+    ];
+
+    function mockModelsFetch() {
+      vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/providers/claude-cli/models")) return { ok: true, json: async () => ({ providerId: "claude-cli", models: CLAUDE_MODELS }) };
+        if (url.includes("/api/providers/codex-cli/models")) return { ok: true, json: async () => ({ providerId: "codex-cli", models: CODEX_MODELS }) };
+        return { ok: true, json: async () => ({ status: "QUEUED", selectedProvider: "codex-cli", providerSession: null, events: [], assistantMessage: null, error: null }) };
+      }));
+    }
+
+    it("refreshes the available model options when the provider changes, and Default is always the first option", async () => {
+      mockModelsFetch();
+      render(<ConversationChat {...baseProps()} />);
+      const providerSelect = screen.getByLabelText("Provider") as HTMLSelectElement;
+      const modelSelect = screen.getByLabelText("Model") as HTMLSelectElement;
+      expect(modelSelect.options[0]!.value).toBe("");
+      expect(modelSelect.options[0]!.textContent).toBe("Default");
+      expect(modelSelect.options).toHaveLength(1);
+
+      fireEvent.change(providerSelect, { target: { value: "claude-cli" } });
+      await waitFor(() => expect(modelSelect.options).toHaveLength(1 + CLAUDE_MODELS.length));
+      expect(Array.from(modelSelect.options).map(o => o.value)).toEqual(expect.arrayContaining(["sonnet", "opus", "claude-legacy"]));
+
+      fireEvent.change(providerSelect, { target: { value: "codex-cli" } });
+      await waitFor(() => expect(modelSelect.options).toHaveLength(1 + CODEX_MODELS.length));
+      expect(modelSelect.value).toBe(""); // reset to Default on provider change
+    });
+
+    it("disables a model whose validation actively reports it unavailable, with a visible reason, but never disables Default", async () => {
+      mockModelsFetch();
+      render(<ConversationChat {...baseProps()} />);
+      fireEvent.change(screen.getByLabelText("Provider"), { target: { value: "claude-cli" } });
+      const modelSelect = screen.getByLabelText("Model") as HTMLSelectElement;
+      await waitFor(() => expect(modelSelect.options).toHaveLength(1 + CLAUDE_MODELS.length));
+
+      const defaultOption = Array.from(modelSelect.options).find(o => o.value === "")!;
+      const sonnetOption = Array.from(modelSelect.options).find(o => o.value === "sonnet")!;
+      const legacyOption = Array.from(modelSelect.options).find(o => o.value === "claude-legacy")!;
+      expect(defaultOption.disabled).toBe(false);
+      expect(sonnetOption.disabled).toBe(false);
+      expect(legacyOption.disabled).toBe(true);
+      expect(legacyOption.textContent).toMatch(/unavailable/i);
+      expect(legacyOption.textContent).toMatch(/model not found/i);
+    });
+
+    it("shows the reasoning effort selector only for a model that supports it", async () => {
+      mockModelsFetch();
+      render(<ConversationChat {...baseProps()} />);
+      fireEvent.change(screen.getByLabelText("Provider"), { target: { value: "claude-cli" } });
+      const modelSelect = screen.getByLabelText("Model") as HTMLSelectElement;
+      await waitFor(() => expect(modelSelect.options).toHaveLength(1 + CLAUDE_MODELS.length));
+
+      fireEvent.change(modelSelect, { target: { value: "sonnet" } });
+      expect(screen.queryByLabelText("Reasoning effort")).toBeNull();
+
+      fireEvent.change(screen.getByLabelText("Provider"), { target: { value: "codex-cli" } });
+      await waitFor(() => expect((screen.getByLabelText("Model") as HTMLSelectElement).options).toHaveLength(1 + CODEX_MODELS.length));
+      fireEvent.change(screen.getByLabelText("Model"), { target: { value: "o3" } });
+      expect(screen.getByLabelText("Reasoning effort")).toBeTruthy();
+      const effortSelect = screen.getByLabelText("Reasoning effort") as HTMLSelectElement;
+      expect(Array.from(effortSelect.options).map(o => o.value)).toEqual(expect.arrayContaining(["low", "medium", "high"]));
+    });
+
+    it("shows the model name in the workspace-write safety label (e.g. \"Claude Opus may modify files...\")", async () => {
+      mockModelsFetch();
+      render(<ConversationChat {...baseProps()} />);
+      fireEvent.change(screen.getByLabelText("Provider"), { target: { value: "claude-cli" } });
+      fireEvent.change(screen.getByLabelText("Mode"), { target: { value: "IMPLEMENT" } });
+      const modelSelect = screen.getByLabelText("Model") as HTMLSelectElement;
+      await waitFor(() => expect(modelSelect.options).toHaveLength(1 + CLAUDE_MODELS.length));
+
+      expect(screen.getByText("Claude may modify files in the registered repository.")).toBeTruthy();
+
+      fireEvent.change(modelSelect, { target: { value: "opus" } });
+      expect(screen.getByText("Claude Opus may modify files in the registered repository.")).toBeTruthy();
+    });
+
+    it("warns that changing the model starts a new provider session when a prior session is pinned to a different model", async () => {
+      mockModelsFetch();
+      render(<ConversationChat {...baseProps({ providerSessions: [{ id: "ps-1", providerId: "claude-cli", status: "RUNNING", resolvedModel: "sonnet" }] })} />);
+      fireEvent.change(screen.getByLabelText("Provider"), { target: { value: "claude-cli" } });
+      const modelSelect = screen.getByLabelText("Model") as HTMLSelectElement;
+      await waitFor(() => expect(modelSelect.options).toHaveLength(1 + CLAUDE_MODELS.length));
+
+      // Still Default (no explicit model) - differs from the pinned "sonnet", so switching now would already start a new session.
+      expect(screen.getByText(/will start a new claude provider session/i)).toBeTruthy();
+
+      fireEvent.change(modelSelect, { target: { value: "sonnet" } });
+      expect(screen.queryByText(/will start a new claude provider session/i)).toBeNull();
+
+      fireEvent.change(modelSelect, { target: { value: "opus" } });
+      expect(screen.getByText(/will start a new claude provider session/i)).toBeTruthy();
+    });
+
+    it("displays the requested/resolved model on an assistant message", () => {
+      render(
+        <ConversationChat
+          {...baseProps({
+            messages: [
+              makeMessage({ id: "a1", role: "ASSISTANT", providerId: "claude-cli", content: "reply", requestedModel: "opus", resolvedModel: "claude-opus-4-8" }),
+            ],
+          })}
+        />
+      );
+      expect(screen.getByText("claude-opus-4-8")).toBeTruthy();
+    });
+
+    it("shows CLI version separately from model on the provider status panel", () => {
+      render(<ConversationChat {...baseProps()} />);
+      expect(screen.getByText(/CLI version: codex 1.0/)).toBeTruthy();
+      expect(screen.getByText(/CLI version: claude 2.0/)).toBeTruthy();
+    });
+  });
 });

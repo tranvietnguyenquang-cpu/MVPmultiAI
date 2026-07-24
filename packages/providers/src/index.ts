@@ -4,7 +4,7 @@ import { ProviderRegistry } from "./registry.js";
 
 export { ClaudeCliProvider } from "./claude-cli-provider.js";
 export { CodexCliProvider } from "./codex-cli-provider.js";
-export { classifyProviderProbe } from "./process-runner.js";
+export { classifyModelProbe, classifyProviderProbe } from "./process-runner.js";
 export { ProviderRegistry } from "./registry.js";
 export {
   ClaudeStreamParser,
@@ -27,6 +27,8 @@ export type {
   CodingProvider,
   ConnectionTest,
   ExecutionCapability,
+  ModelAvailability,
+  ModelProbe,
   ProviderAuthentication,
   ProviderId,
   ProviderProbe,

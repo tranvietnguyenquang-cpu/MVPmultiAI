@@ -486,12 +486,20 @@ async function processClaimedConversationMessage(input: {
     // the prior turn's real external thread id for this exact provider in this exact
     // conversation - never another provider's, another conversation's, or a fabricated one.
     const resumeExternalId = providerSession.externalSessionId ?? undefined;
+    // The model was already resolved and persisted at queue time (see
+    // queueConversationMessage): the worker trusts that recorded value rather than
+    // re-deriving it, and it is never a raw browser string. Absent (null) means Default -
+    // no --model flag is passed at all.
+    const model = session.requestedModel ?? undefined;
+    const reasoningEffort = session.reasoningEffort ?? undefined;
     let providerAgentSession = await provider.createSession({
       workspace: session.project.repositoryPath,
       taskId: session.taskId,
       capability,
       ...(role ? { role } : {}),
       ...(resumeExternalId ? { resumeExternalId } : {}),
+      ...(model ? { model } : {}),
+      ...(reasoningEffort ? { reasoningEffort } : {}),
       processLifecycle: ownershipLifecycle({ agentSessionId: session.id, providerId: session.providerId, workerId }),
     });
     await event(session.id, "state", resumeExternalId ? `Resuming ${provider.name} session ${resumeExternalId}.` : `Running ${status.version ?? provider.name}.`);
@@ -510,6 +518,8 @@ async function processClaimedConversationMessage(input: {
         taskId: session.taskId,
         capability,
         ...(role ? { role } : {}),
+        ...(model ? { model } : {}),
+        ...(reasoningEffort ? { reasoningEffort } : {}),
         processLifecycle: ownershipLifecycle({ agentSessionId: session.id, providerId: session.providerId, workerId }),
       });
       assistantText = await executeProviderTurn({ provider, providerAgentSession, capsule, resume: false, timeout: timeoutPolicy ?? providerTimeoutPolicy(session.providerId, userMessage.mode as ConversationMode, timeoutMs), sessionId: session.id, workerId });
@@ -520,11 +530,21 @@ async function processClaimedConversationMessage(input: {
     // Never fall back to the internal session UUID: an absent externalId means the
     // provider genuinely never reported one, and that must be persisted as null.
     const externalSessionId = providerAgentSession.externalId ?? null;
+    // The CLI's own structured stream is the authoritative source for resolvedModel (see
+    // stream-parser.ts). Some providers (observed: Codex's exec --json protocol) never
+    // report one in-band at all - that is not treated as a failure, but the execution
+    // otherwise succeeded, so the requested model is recorded as the best-effort resolved
+    // value and the gap is still surfaced as a distinct, visible event rather than silently
+    // assumed.
+    const resolvedModel = providerAgentSession.resolvedModel ?? model ?? null;
+    if (model && !providerAgentSession.resolvedModel) {
+      await event(session.id, "state", `${provider.name} did not report a resolved model; assuming the requested model '${model}' was used.`);
+    }
 
     const completed = await prisma.$transaction(async tx => {
       const finalized = await tx.agentSession.updateMany({
         where: { id: session.id, state: "RUNNING", workerId },
-        data: { state: "SUCCEEDED", endedAt: new Date(), exitCode: 0, usage, externalId: externalSessionId, ...releasedLeaseFields }
+        data: { state: "SUCCEEDED", endedAt: new Date(), exitCode: 0, usage, externalId: externalSessionId, resolvedModel, resolvedAt: new Date(), ...(status.version ? { providerVersion: status.version } : {}), ...releasedLeaseFields }
       });
       if (!finalized.count) return false;
       const assistantMessage = await tx.conversationMessage.create({
@@ -537,6 +557,8 @@ async function processClaimedConversationMessage(input: {
           content: redactedOutput,
           status: "COMPLETED",
           agentSessionId: session.id,
+          requestedModel: session.requestedModel,
+          resolvedModel,
           ...(handoffCapsule ? { handoffCapsuleId: handoffCapsule.id } : {}),
           ...(session.taskId ? { taskId: session.taskId } : {})
         }
@@ -567,6 +589,7 @@ async function processClaimedConversationMessage(input: {
           content: message,
           status: "FAILED",
           agentSessionId: session.id,
+          requestedModel: session.requestedModel,
           ...(session.taskId ? { taskId: session.taskId } : {})
         }
       });

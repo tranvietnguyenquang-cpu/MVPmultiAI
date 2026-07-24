@@ -10,6 +10,7 @@ export type ParsedStreamEvent =
   | { kind: "assistant-final"; text: string }
   | { kind: "session"; externalSessionId: string }
   | { kind: "usage"; usage: UsageReport }
+  | { kind: "model"; resolvedModel: string }
   | { kind: "terminal"; status: "SUCCEEDED" | "FAILED"; reason?: string }
   | { kind: "diagnostic"; message: string };
 
@@ -138,8 +139,18 @@ export class ClaudeStreamParser implements StructuredStreamParser {
 
     const type = str(record, "type");
     switch (type) {
-      case "system":
+      case "system": {
+        // The init event's top-level "model" field is Claude Code's own authoritative
+        // report of which model this session actually resolved to (confirmed to differ
+        // from the requested alias, e.g. --model opus resolves to "claude-opus-4-8") -
+        // never taken from a later "assistant" message, which can report a synthetic
+        // placeholder model on failure (e.g. "<synthetic>" for an invalid model id).
+        if (str(record, "subtype") === "init") {
+          const resolvedModel = str(record, "model");
+          if (resolvedModel) events.push({ kind: "model", resolvedModel });
+        }
         return events;
+      }
       case "assistant": {
         // Intermediate assistant message blocks are progress/state, not the final answer:
         // Claude's terminal "result" event carries the authoritative complete text (below).
@@ -177,6 +188,7 @@ export type StreamOutcome = {
   assistantText: string;
   usage: UsageReport;
   externalSessionId?: string;
+  resolvedModel?: string;
   terminal?: { status: "SUCCEEDED" | "FAILED"; reason?: string };
   diagnostics: string[];
 };
@@ -186,6 +198,7 @@ export class StructuredStreamAccumulator {
   private assistantText = "";
   private usage: UsageReport = { estimated: true };
   private externalSessionId: string | undefined;
+  private resolvedModel: string | undefined;
   private terminal: { status: "SUCCEEDED" | "FAILED"; reason?: string } | undefined;
   private readonly diagnostics: string[] = [];
 
@@ -223,6 +236,9 @@ export class StructuredStreamAccumulator {
       case "session":
         this.externalSessionId = evt.externalSessionId;
         break;
+      case "model":
+        this.resolvedModel = evt.resolvedModel;
+        break;
       case "usage":
         this.usage = evt.usage;
         break;
@@ -240,6 +256,7 @@ export class StructuredStreamAccumulator {
       assistantText: this.assistantText,
       usage: this.usage,
       ...(this.externalSessionId ? { externalSessionId: this.externalSessionId } : {}),
+      ...(this.resolvedModel ? { resolvedModel: this.resolvedModel } : {}),
       ...(this.terminal ? { terminal: this.terminal } : {}),
       diagnostics: [...this.diagnostics]
     };

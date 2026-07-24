@@ -7,18 +7,20 @@ import type { ConversationMessage, HandoffCapsule, ProviderSession, RoutingDecis
  * here should only expose the fields the UI actually uses.
  */
 
-export type ProviderSessionDto = { id: string; providerId: string; status: string; startedAt: Date | null; endedAt: Date | null };
+export type ProviderSessionDto = { id: string; providerId: string; status: string; resolvedModel: string | null; reasoningEffort: string | null; startedAt: Date | null; endedAt: Date | null };
 export function toProviderSessionDto(session: ProviderSession): ProviderSessionDto {
-  return { id: session.id, providerId: session.providerId, status: session.status, startedAt: session.startedAt, endedAt: session.endedAt };
+  return { id: session.id, providerId: session.providerId, status: session.status, resolvedModel: session.resolvedModel, reasoningEffort: session.reasoningEffort, startedAt: session.startedAt, endedAt: session.endedAt };
 }
 
-export type HandoffCapsuleDto = { id: string; conversationId: string; fromProviderId: string; toProviderId: string; version: number; checksum: string; createdAt: Date };
+export type HandoffCapsuleDto = { id: string; conversationId: string; fromProviderId: string; toProviderId: string; fromModel: string | null; toModel: string | null; version: number; checksum: string; createdAt: Date };
 export function toHandoffCapsuleDto(capsule: HandoffCapsule): HandoffCapsuleDto {
   return {
     id: capsule.id,
     conversationId: capsule.conversationId,
     fromProviderId: capsule.fromProviderId,
     toProviderId: capsule.toProviderId,
+    fromModel: capsule.fromModel,
+    toModel: capsule.toModel,
     version: capsule.version,
     checksum: capsule.checksum,
     createdAt: capsule.createdAt
@@ -37,6 +39,8 @@ export type ConversationMessageDto = {
   handoffCapsuleId: string | null;
   taskId: string | null;
   agentSessionId: string | null;
+  requestedModel: string | null;
+  resolvedModel: string | null;
   createdAt: Date;
 };
 export function toConversationMessageDto(message: ConversationMessage): ConversationMessageDto {
@@ -52,6 +56,8 @@ export function toConversationMessageDto(message: ConversationMessage): Conversa
     handoffCapsuleId: message.handoffCapsuleId,
     taskId: message.taskId,
     agentSessionId: message.agentSessionId,
+    requestedModel: message.requestedModel,
+    resolvedModel: message.resolvedModel,
     createdAt: message.createdAt
   };
 }
@@ -62,6 +68,8 @@ export type RoutingDecisionDto = {
   userMessageId: string | null;
   requestedProviderId: string | null;
   selectedProviderId: string;
+  requestedModel: string | null;
+  selectedModel: string | null;
   reason: string;
   providerHealthSnapshot: unknown;
   createdAt: Date;
@@ -73,6 +81,8 @@ export function toRoutingDecisionDto(decision: RoutingDecision): RoutingDecision
     userMessageId: decision.userMessageId,
     requestedProviderId: decision.requestedProviderId,
     selectedProviderId: decision.selectedProviderId,
+    requestedModel: decision.requestedModel,
+    selectedModel: decision.selectedModel,
     reason: decision.reason,
     providerHealthSnapshot: decision.providerHealthSnapshot,
     createdAt: decision.createdAt

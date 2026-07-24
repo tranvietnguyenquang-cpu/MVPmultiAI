@@ -36,6 +36,8 @@ export default async function ConversationPage({ params }: { params: Promise<{ i
       content: message.content,
       status: message.status,
       handoffCapsuleId: message.handoffCapsuleId,
+      requestedModel: message.requestedModel,
+      resolvedModel: message.resolvedModel,
       createdAt: message.createdAt.toISOString(),
       ...(routingDecision
         ? { routing: { requestedProviderId: routingDecision.requestedProviderId, selectedProviderId: routingDecision.selectedProviderId } }
@@ -57,7 +59,8 @@ export default async function ConversationPage({ params }: { params: Promise<{ i
   const providerSessions = conversation.providerSessions.map(session => ({
     id: session.id,
     providerId: session.providerId,
-    status: session.status
+    status: session.status,
+    resolvedModel: session.resolvedModel
   }));
 
   return (

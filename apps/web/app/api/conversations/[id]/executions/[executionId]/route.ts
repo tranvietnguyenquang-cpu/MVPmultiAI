@@ -24,6 +24,11 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     return NextResponse.json({
       status: execution.agentSession.state,
       selectedProvider: execution.agentSession.providerId,
+      requestedModel: execution.agentSession.requestedModel,
+      resolvedModel: execution.agentSession.resolvedModel,
+      reasoningEffort: execution.agentSession.reasoningEffort,
+      modelSource: execution.agentSession.modelSource,
+      providerVersion: execution.agentSession.providerVersion,
       startedAt: execution.agentSession.startedAt ?? execution.agentSession.createdAt,
       failureCode: execution.agentSession.failureCode,
       providerSession: execution.providerSession ? toProviderSessionDto(execution.providerSession) : null,
