@@ -16,7 +16,16 @@ const runtimeDir = path.join(stateRoot, "runtime");
 export const runtimeFile = path.join(runtimeDir, "local-processes.json");
 const logDir = path.join(stateRoot, "logs");
 export const webPort = Number(process.env.PROJECT_RELAY_WEB_PORT || 3000);
-export const url = `http://127.0.0.1:${webPort}`;
+// "localhost" is the one canonical browser-facing origin for the whole app: Next's own
+// NextRequest.nextUrl.origin always reports "http://localhost:<port>" regardless of the
+// actual Host header used to connect (see apps/web/proxy.ts), so the app's same-origin
+// CSRF/session-bootstrap check can only ever match a request that arrived via "localhost".
+// The web server still only *binds* to the loopback interface (127.0.0.1) via
+// `--hostname 127.0.0.1`; "localhost" resolves there. Every status line, health check,
+// and browser launch below intentionally shares this single constant so they can never
+// drift apart again - a request that still reaches the server via 127.0.0.1 is safely
+// redirected to this same canonical URL by apps/web/proxy.ts before session bootstrap.
+export const url = `http://localhost:${webPort}`;
 const isWindows = process.platform === "win32";
 
 function out(prefix, message) { console.log(`[${prefix}] ${message}`); }
@@ -314,7 +323,7 @@ async function waitForWeb(web, workerFailed) {
     if (workerFailed?.()) throw new Error("Worker exited before web became healthy. Check .project-relay/logs/worker.log.");
     await new Promise((resolve) => setTimeout(resolve, 500));
   }
-  throw new Error(`Web did not respond on 127.0.0.1:${webPort}.`);
+  throw new Error(`Web did not respond on ${url}.`);
 }
 function browserCommand(target) {
   // Overridable only for tests, so a test run never actually launches a browser.

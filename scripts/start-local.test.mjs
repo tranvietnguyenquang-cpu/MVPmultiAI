@@ -210,7 +210,7 @@ describe("start-local.mjs launcher orchestration", () => {
     expect(await fetchOk(`http://127.0.0.1:${port}`)).toBe(false);
   }, 30_000);
 
-  it("opens the browser command only after the web health check succeeds", async () => {
+  it("opens the browser at the canonical localhost URL, only after the web health check succeeds", async () => {
     const { port, env } = await isolatedEnv({
       PROJECT_RELAY_OPEN_BROWSER: "true",
       FIXTURE_DELAY_MS: "1200",
@@ -225,7 +225,28 @@ describe("start-local.mjs launcher orchestration", () => {
       expect(await fileExists(marker)).toBe(false);
 
       expect(await waitUntil(() => fileExists(marker), { timeoutMs: 10_000 })).toBe(true);
-      expect(await readFile(marker, "utf8")).toBe(`http://127.0.0.1:${port}`);
+      // The browser is opened at "http://localhost:<port>" - the one canonical origin
+      // apps/web's same-origin CSRF/session-bootstrap check can match - never the raw
+      // "127.0.0.1" bind address, even though the web server still binds there.
+      expect(await readFile(marker, "utf8")).toBe(`http://localhost:${port}`);
+    } finally {
+      const stop = runLauncher("stop", env);
+      await stop.exit;
+      if (start.child.exitCode === null) start.child.kill();
+      await start.exit;
+    }
+  }, 30_000);
+
+  it("reports status with the canonical localhost URL, not the raw 127.0.0.1 bind address", async () => {
+    const { port, runtimeFile, env } = await isolatedEnv();
+    const start = runLauncher("start", env);
+    try {
+      expect(await waitUntil(() => fetchOk(`http://127.0.0.1:${port}`))).toBe(true);
+      expect(await waitUntil(() => fileExists(runtimeFile))).toBe(true);
+      const status = runLauncher("status", env);
+      await status.exit;
+      expect(status.stdout).toMatch(/URL: http:\/\/localhost:\d+/);
+      expect(status.stdout).not.toContain("URL: http://127.0.0.1");
     } finally {
       const stop = runLauncher("stop", env);
       await stop.exit;
