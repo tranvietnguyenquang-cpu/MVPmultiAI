@@ -473,7 +473,12 @@ async function processClaimedConversationMessage(input: {
     await event(session.id, "state", "Prompt constructed from bounded conversation context.");
 
     const role = roleForMode(userMessage.mode);
-    const capability = getProviderModeCapability(session.providerId, userMessage.mode);
+    // The capability was already resolved and persisted at queue time (see
+    // queueConversationMessage), including Claude's CONTINUE inheritance - the worker
+    // trusts that recorded value rather than re-deriving it, so execution always uses
+    // the exact capability the AgentSession was created with. The matrix lookup is only
+    // a fallback for historical rows created before the capability column existed.
+    const capability = (session.capability as ProviderAgentSession["capability"] | null) ?? getProviderModeCapability(session.providerId, userMessage.mode);
     if (!capability) throw new Error(`Unsupported execution: ${session.providerId} does not support ${userMessage.mode} mode.`);
 
     // Resume only the same conversation/provider session: providerSession is already

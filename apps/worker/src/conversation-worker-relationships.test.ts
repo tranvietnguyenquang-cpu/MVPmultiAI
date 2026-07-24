@@ -189,15 +189,20 @@ describe("conversation worker relationship validation", () => {
     expect(otherMessages.every(message => message.role !== "ASSISTANT")).toBe(true);
   });
 
-  it("rejects a stale payload whose mode is unsupported for the recorded provider (Claude IMPLEMENT) without invoking the provider", async () => {
+  it("rejects a stale payload naming a provider absent from the capability matrix, without invoking the provider", async () => {
+    // Every real provider/mode combination is now capability-supported (Claude gained
+    // IMPLEMENT), so the only way to reach the "unsupported execution" branch is a
+    // genuinely foreign providerId - e.g. a decommissioned provider or a corrupted/replayed
+    // payload from an older producer. Mutate providerId consistently everywhere the worker
+    // cross-checks it (agentSession, providerSession, routingDecision, payload) so this
+    // isolates the capability check itself rather than tripping an earlier cross-wired check.
     const conversation = await newConversation(projectId, "Unsupported capability");
     const fake = makeFakeProvider("claude-cli");
-    const { payload } = await queueTestMessage({ conversationId: conversation.id, projectId, selectedProviderId: "claude-cli" });
-    // queueConversationMessage itself refuses to create a Claude+IMPLEMENT execution; simulate a
-    // stale/corrupted payload that reaches the worker with an unsupported mode anyway (e.g. a
-    // message row mutated after routing, or a payload replayed from an older, looser producer).
-    await prisma.conversationMessage.update({ where: { id: payload.messageId }, data: { mode: "IMPLEMENT" } });
-    await expectRejectedWithoutInvokingProvider(payload, fake, /unsupported execution/i);
+    const { payload, result } = await queueTestMessage({ conversationId: conversation.id, projectId, selectedProviderId: "claude-cli" });
+    await prisma.agentSession.update({ where: { id: result.agentSession.id }, data: { providerId: "decommissioned-provider" } });
+    await prisma.providerSession.update({ where: { id: result.providerSession.id }, data: { providerId: "decommissioned-provider" } });
+    await prisma.routingDecision.update({ where: { id: result.routingDecision.id }, data: { selectedProviderId: "decommissioned-provider" } });
+    await expectRejectedWithoutInvokingProvider({ ...payload, providerId: "decommissioned-provider" }, fake, /unsupported execution/i);
   });
 
   it("enforces at most one assistant message per AgentSession at the database level", async () => {

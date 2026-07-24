@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
+import { getProviderModeCapability } from "@project-relay/shared";
 import { csrfFetch } from "../lib/csrf-client";
 
 export type ConversationMessageView = {
@@ -128,6 +129,10 @@ export function ConversationChat(props: {
 
   async function submit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (provider !== "auto" && !getProviderModeCapability(provider, mode)) {
+      setComposerError(`${provider} does not support ${mode} execution.`);
+      return;
+    }
     const trimmed = content.trim();
     if (!trimmed) {
       setComposerError("Message cannot be empty.");
@@ -155,6 +160,13 @@ export function ConversationChat(props: {
   }
 
   const busy = submitting || pending !== null;
+  // Purely descriptive: the browser never sends this value anywhere, and the server
+  // independently re-derives (and persists) the authoritative capability for every
+  // queued execution - this only drives Send-button state and the safety label below.
+  const explicitCapability = provider !== "auto" ? getProviderModeCapability(provider, mode) : null;
+  const unsupportedPair = provider !== "auto" && !explicitCapability;
+  const sendDisabled = busy || unsupportedPair;
+  const workspaceWriteWarning = provider === "claude-cli" && explicitCapability === "WORKSPACE_WRITE";
   async function cancelExecution(){if(!pending)return;await csrfFetch(`/api/conversations/${conversationId}/executions/${pending.id}/cancel?projectId=${projectId}`,{method:"POST"});setPending(null);router.refresh();}
   async function retryExecution(executionId:string,providerId:string){setComposerError("");const response=await csrfFetch(`/api/conversations/${conversationId}/executions/${executionId}/retry`,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({projectId,provider:"same",idempotencyKey:crypto.randomUUID()})});const data=await response.json()as{executionId?:string;error?:string};if(!response.ok){setComposerError(data.error??"Retry failed.");return;}setPending({id:data.executionId!,status:"QUEUED",events:[],error:null,provider:providerId});router.refresh();}
 
@@ -248,8 +260,10 @@ export function ConversationChat(props: {
               </select>
             </label>
           </div>
+          {workspaceWriteWarning && <p className="warn">Claude may modify files in the registered repository.</p>}
+          {unsupportedPair && <p className="warn">{provider} does not support {mode} execution.</p>}
           {composerError && <p className="warn">{composerError}</p>}
-          <button disabled={busy}>{pending ? "Execution in progress…" : submitting ? "Sending…" : "Send"}</button>
+          <button disabled={sendDisabled}>{pending ? "Execution in progress…" : submitting ? "Sending…" : "Send"}</button>
         </form>
       </section>
     </div>

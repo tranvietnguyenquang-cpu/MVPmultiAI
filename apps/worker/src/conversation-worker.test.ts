@@ -243,6 +243,49 @@ describe("conversation worker execution", () => {
     expect(assistant.agentSessionId).toBe(result.agentSession.id);
   });
 
+  it("grants Claude IMPLEMENT workspace-write capability at execution time, and attributes the result correctly", async () => {
+    const conversation = await newConversation("Claude implement capability");
+    const fake = makeFakeProvider("claude-cli", { events: [{ type: "stdout", message: "implemented" }] });
+    const { payload, result } = await queueTestMessage({ conversationId: conversation.id, projectId, content: "please implement this", mode: "IMPLEMENT", selectedProviderId: "claude-cli" });
+    expect(result.agentSession.capability).toBe("WORKSPACE_WRITE");
+
+    await processConversationMessage({ data: payload } as unknown as Job<ConversationMessageJob>, { registry: makeRegistry({ "claude-cli": fake.provider }) });
+
+    expect(fake.createSession).toHaveBeenCalledTimes(1);
+    expect(fake.createSession.mock.calls[0]?.[0]).toMatchObject({ capability: "WORKSPACE_WRITE" });
+    const session = await prisma.agentSession.findUniqueOrThrow({ where: { id: payload.sessionId } });
+    expect(session.state).toBe("SUCCEEDED");
+    const assistant = await prisma.conversationMessage.findFirstOrThrow({ where: { conversationId: conversation.id, role: "ASSISTANT" } });
+    expect(assistant.providerId).toBe("claude-cli");
+    expect(assistant.providerSessionId).toBe(result.providerSession.id);
+    expect(assistant.status).toBe("COMPLETED");
+  });
+
+  it.each(["ASK", "REVIEW", "VERIFY"] as const)("keeps Claude %s read-only at execution time", async mode => {
+    const conversation = await newConversation(`Claude ${mode} capability`);
+    const fake = makeFakeProvider("claude-cli");
+    const { payload, result } = await queueTestMessage({ conversationId: conversation.id, projectId, content: "hello", mode, selectedProviderId: "claude-cli" });
+    expect(result.agentSession.capability).toBe("READ_ONLY");
+
+    await processConversationMessage({ data: payload } as unknown as Job<ConversationMessageJob>, { registry: makeRegistry({ "claude-cli": fake.provider }) });
+
+    expect(fake.createSession.mock.calls[0]?.[0]).toMatchObject({ capability: "READ_ONLY" });
+  });
+
+  it("rejects a request for an unhealthy Claude provider before ever invoking it", async () => {
+    const conversation = await newConversation("Claude unhealthy rejected");
+    const fake = makeFakeProvider("claude-cli", { available: false, authentication: "NOT_AUTHENTICATED" });
+    const { payload } = await queueTestMessage({ conversationId: conversation.id, projectId, content: "please implement this", mode: "IMPLEMENT", selectedProviderId: "claude-cli" });
+
+    await expect(processConversationMessage({ data: payload } as unknown as Job<ConversationMessageJob>, { registry: makeRegistry({ "claude-cli": fake.provider }) })).rejects.toThrow();
+
+    expect(fake.createSession).not.toHaveBeenCalled();
+    const session = await prisma.agentSession.findUniqueOrThrow({ where: { id: payload.sessionId } });
+    expect(session.state).toBe("FAILED");
+    const assistant = await prisma.conversationMessage.findFirstOrThrow({ where: { conversationId: conversation.id, role: "ASSISTANT" } });
+    expect(assistant.status).toBe("FAILED");
+  });
+
   it("keeps Codex and Claude external session IDs isolated", async () => {
     const conversation = await newConversation("Session isolation");
     const codex = makeFakeProvider("codex-cli", { externalId: "codex-external-1" });

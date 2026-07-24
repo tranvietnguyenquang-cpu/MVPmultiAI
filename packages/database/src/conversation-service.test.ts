@@ -228,7 +228,7 @@ describe("conversation service: database-backed operations", () => {
     expect(details?.handoffCapsules[0]?.version).toBe(1);
   });
 
-  it("rejects queueing Claude IMPLEMENT before creating any rows (unsupported provider/mode capability)", async () => {
+  it("rejects queueing an unknown provider/mode combination before creating any rows", async () => {
     const conversation = await createConversation(projectId, "Unsupported capability");
 
     await expect(
@@ -237,7 +237,7 @@ describe("conversation service: database-backed operations", () => {
         projectId,
         content: "please implement this",
         mode: "IMPLEMENT",
-        selectedProviderId: "claude-cli",
+        selectedProviderId: "gpt-4",
         reason: "test",
         providerHealthSnapshot: {},
         previousAssistantMessage: null,
@@ -251,7 +251,7 @@ describe("conversation service: database-backed operations", () => {
     expect(sessions).toHaveLength(0);
   });
 
-  it("allows queueing Codex IMPLEMENT (the only supported workspace-write combination)", async () => {
+  it("allows queueing Codex IMPLEMENT and persists workspace-write capability", async () => {
     const conversation = await createConversation(projectId, "Codex implement allowed");
 
     const result = await queueConversationMessage({
@@ -266,5 +266,108 @@ describe("conversation service: database-backed operations", () => {
       idempotencyKey: randomUUID(),
     });
     expect(result.duplicate).toBe(false);
+    if (result.duplicate) throw new Error("unreachable");
+    expect(result.agentSession.capability).toBe("WORKSPACE_WRITE");
+  });
+
+  it("allows queueing Claude IMPLEMENT and persists workspace-write capability", async () => {
+    const conversation = await createConversation(projectId, "Claude implement allowed");
+
+    const result = await queueConversationMessage({
+      conversationId: conversation.id,
+      projectId,
+      content: "please implement this",
+      mode: "IMPLEMENT",
+      selectedProviderId: "claude-cli",
+      reason: "test",
+      providerHealthSnapshot: {},
+      previousAssistantMessage: null,
+      idempotencyKey: randomUUID(),
+    });
+    expect(result.duplicate).toBe(false);
+    if (result.duplicate) throw new Error("unreachable");
+    expect(result.agentSession.capability).toBe("WORKSPACE_WRITE");
+  });
+
+  it("keeps Claude ASK/REVIEW/VERIFY read-only", async () => {
+    for (const mode of ["ASK", "REVIEW", "VERIFY"] as const) {
+      const conversation = await createConversation(projectId, `Claude ${mode} read-only`);
+      const result = await queueConversationMessage({
+        conversationId: conversation.id,
+        projectId,
+        content: "hello",
+        mode,
+        selectedProviderId: "claude-cli",
+        reason: "test",
+        providerHealthSnapshot: {},
+        previousAssistantMessage: null,
+        idempotencyKey: randomUUID(),
+      });
+      expect(result.duplicate).toBe(false);
+      if (result.duplicate) throw new Error("unreachable");
+      expect(result.agentSession.capability).toBe("READ_ONLY");
+    }
+  });
+
+  it("has Claude CONTINUE inherit the capability of the execution being continued", async () => {
+    const conversation = await createConversation(projectId, "Claude continue inherits capability");
+    const implementRun = await queueConversationMessage({
+      conversationId: conversation.id,
+      projectId,
+      content: "please implement this",
+      mode: "IMPLEMENT",
+      selectedProviderId: "claude-cli",
+      reason: "test",
+      providerHealthSnapshot: {},
+      previousAssistantMessage: null,
+      idempotencyKey: randomUUID(),
+    });
+    if (implementRun.duplicate) throw new Error("unreachable");
+    expect(implementRun.agentSession.capability).toBe("WORKSPACE_WRITE");
+
+    const continueRun = await queueConversationMessage({
+      conversationId: conversation.id,
+      projectId,
+      content: "keep going",
+      mode: "CONTINUE",
+      selectedProviderId: "claude-cli",
+      reason: "test",
+      providerHealthSnapshot: {},
+      previousAssistantMessage: null,
+      idempotencyKey: randomUUID(),
+    });
+    if (continueRun.duplicate) throw new Error("unreachable");
+    expect(continueRun.agentSession.capability).toBe("WORKSPACE_WRITE");
+  });
+
+  it("keeps Codex CONTINUE read-only even after a Codex IMPLEMENT run (unchanged Codex behavior)", async () => {
+    const conversation = await createConversation(projectId, "Codex continue stays read-only");
+    const implementRun = await queueConversationMessage({
+      conversationId: conversation.id,
+      projectId,
+      content: "please implement this",
+      mode: "IMPLEMENT",
+      selectedProviderId: "codex-cli",
+      reason: "test",
+      providerHealthSnapshot: {},
+      previousAssistantMessage: null,
+      idempotencyKey: randomUUID(),
+    });
+    if (implementRun.duplicate) throw new Error("unreachable");
+    expect(implementRun.agentSession.capability).toBe("WORKSPACE_WRITE");
+
+    const continueRun = await queueConversationMessage({
+      conversationId: conversation.id,
+      projectId,
+      content: "keep going",
+      mode: "CONTINUE",
+      selectedProviderId: "codex-cli",
+      reason: "test",
+      providerHealthSnapshot: {},
+      previousAssistantMessage: null,
+      idempotencyKey: randomUUID(),
+    });
+    if (continueRun.duplicate) throw new Error("unreachable");
+    expect(continueRun.agentSession.capability).toBe("READ_ONLY");
   });
 });

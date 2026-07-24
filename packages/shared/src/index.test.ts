@@ -1,8 +1,8 @@
-import { describe,expect,it } from "vitest"; import { approximateTokens,canVerify,commandSpecSchema,compactReviewCapsule,criterionAcceptsEvidence,findLockedDecisionConflicts,getProviderModeCapability,listProviderModeCapabilities } from "./index.js";
+import { describe,expect,it } from "vitest"; import { approximateTokens,canVerify,commandSpecSchema,compactReviewCapsule,criterionAcceptsEvidence,findLockedDecisionConflicts,getProviderModeCapability,listProviderModeCapabilities,resolveExecutionCapability } from "./index.js";
 describe("provider/mode capability matrix",()=>{
   const expected:Record<string,"READ_ONLY"|"WORKSPACE_WRITE"|null>={
     "codex-cli:ASK":"READ_ONLY","codex-cli:REVIEW":"READ_ONLY","codex-cli:VERIFY":"READ_ONLY","codex-cli:CONTINUE":"READ_ONLY","codex-cli:IMPLEMENT":"WORKSPACE_WRITE",
-    "claude-cli:ASK":"READ_ONLY","claude-cli:REVIEW":"READ_ONLY","claude-cli:VERIFY":"READ_ONLY","claude-cli:CONTINUE":"READ_ONLY","claude-cli:IMPLEMENT":null
+    "claude-cli:ASK":"READ_ONLY","claude-cli:REVIEW":"READ_ONLY","claude-cli:VERIFY":"READ_ONLY","claude-cli:CONTINUE":"READ_ONLY","claude-cli:IMPLEMENT":"WORKSPACE_WRITE"
   };
   it("matches the full tested provider/mode matrix exactly",()=>{
     for(const entry of listProviderModeCapabilities())expect(entry.capability,`${entry.providerId}:${entry.mode}`).toBe(expected[`${entry.providerId}:${entry.mode}`]);
@@ -12,8 +12,28 @@ describe("provider/mode capability matrix",()=>{
     for(const providerId of["codex-cli","claude-cli"]as const)for(const mode of["ASK","REVIEW","VERIFY"]as const)expect(getProviderModeCapability(providerId,mode)).toBe("READ_ONLY");
   });
   it("grants Codex IMPLEMENT workspace-write",()=>{expect(getProviderModeCapability("codex-cli","IMPLEMENT")).toBe("WORKSPACE_WRITE");});
-  it("rejects Claude IMPLEMENT as unsupported rather than downgrading it",()=>{expect(getProviderModeCapability("claude-cli","IMPLEMENT")).toBeNull();});
+  it("grants Claude IMPLEMENT workspace-write",()=>{expect(getProviderModeCapability("claude-cli","IMPLEMENT")).toBe("WORKSPACE_WRITE");});
   it("rejects an unknown provider or mode",()=>{expect(getProviderModeCapability("gpt-4","ASK")).toBeNull();expect(getProviderModeCapability("codex-cli","CHAT")).toBeNull();});
+});
+describe("execution capability resolution (CONTINUE inheritance)",()=>{
+  it("has Claude CONTINUE inherit workspace-write from the execution being continued",()=>{
+    expect(resolveExecutionCapability("claude-cli","CONTINUE","WORKSPACE_WRITE")).toBe("WORKSPACE_WRITE");
+  });
+  it("has Claude CONTINUE inherit read-only from the execution being continued",()=>{
+    expect(resolveExecutionCapability("claude-cli","CONTINUE","READ_ONLY")).toBe("READ_ONLY");
+  });
+  it("falls back to the read-only matrix default when Claude CONTINUE has nothing to continue",()=>{
+    expect(resolveExecutionCapability("claude-cli","CONTINUE",null)).toBe("READ_ONLY");
+    expect(resolveExecutionCapability("claude-cli","CONTINUE")).toBe("READ_ONLY");
+  });
+  it("never lets Claude CONTINUE inherit past the static matrix for non-CONTINUE modes",()=>{
+    expect(resolveExecutionCapability("claude-cli","ASK","WORKSPACE_WRITE")).toBe("READ_ONLY");
+    expect(resolveExecutionCapability("claude-cli","IMPLEMENT","READ_ONLY")).toBe("WORKSPACE_WRITE");
+  });
+  it("keeps Codex CONTINUE unchanged: always read-only regardless of the execution being continued",()=>{
+    expect(resolveExecutionCapability("codex-cli","CONTINUE","WORKSPACE_WRITE")).toBe("READ_ONLY");
+    expect(resolveExecutionCapability("codex-cli","CONTINUE",null)).toBe("READ_ONLY");
+  });
 });
 describe("verification gate",()=>{it("requires successful evidence for every criterion",()=>{expect(canVerify([{evidence:[{successful:true}]},{evidence:[]}])).toBe(false);expect(canVerify([{evidence:[{successful:true}]},{evidence:[{successful:true}]}])).toBe(true);expect(canVerify([])).toBe(false);});});
 describe("token estimate",()=>{it("returns a conservative non-zero approximation",()=>{expect(approximateTokens({hello:"world"})).toBeGreaterThan(0);});});

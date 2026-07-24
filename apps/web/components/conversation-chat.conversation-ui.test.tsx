@@ -237,6 +237,38 @@ describe("ConversationChat", () => {
     expect(occurrencesAfterFirstPoll).toBe(1);
   });
 
+  it("shows the workspace-write safety label only for an explicit Claude + Implement selection", () => {
+    render(<ConversationChat {...baseProps()} />);
+    const providerSelect = screen.getByLabelText("Provider") as HTMLSelectElement;
+    const modeSelect = screen.getByLabelText("Mode") as HTMLSelectElement;
+    expect(screen.queryByText(/claude may modify files/i)).toBeNull();
+
+    fireEvent.change(providerSelect, { target: { value: "claude-cli" } });
+    fireEvent.change(modeSelect, { target: { value: "IMPLEMENT" } });
+    expect(screen.getByText("Claude may modify files in the registered repository.")).toBeTruthy();
+
+    fireEvent.change(modeSelect, { target: { value: "ASK" } });
+    expect(screen.queryByText(/claude may modify files/i)).toBeNull();
+
+    fireEvent.change(providerSelect, { target: { value: "codex-cli" } });
+    fireEvent.change(modeSelect, { target: { value: "IMPLEMENT" } });
+    expect(screen.queryByText(/claude may modify files/i)).toBeNull();
+  });
+
+  it("keeps Send enabled for every explicit provider/mode pair, since all are now capability-supported", () => {
+    render(<ConversationChat {...baseProps()} />);
+    const providerSelect = screen.getByLabelText("Provider") as HTMLSelectElement;
+    const modeSelect = screen.getByLabelText("Mode") as HTMLSelectElement;
+    const sendButton = screen.getByRole("button", { name: /send/i }) as HTMLButtonElement;
+    for (const providerId of ["codex-cli", "claude-cli"]) {
+      fireEvent.change(providerSelect, { target: { value: providerId } });
+      for (const mode of ["ASK", "IMPLEMENT", "REVIEW", "CONTINUE", "VERIFY"]) {
+        fireEvent.change(modeSelect, { target: { value: mode } });
+        expect(sendButton.disabled).toBe(false);
+      }
+    }
+  });
+
   it("stops polling once the execution reaches a terminal state", async () => {
     vi.useFakeTimers();
     const fetchMock = vi.fn(async () => ({ ok: true, json: async () => ({ status: "SUCCEEDED", selectedProvider: "codex-cli", providerSession: null, events: [], assistantMessage: null, error: null }) }));

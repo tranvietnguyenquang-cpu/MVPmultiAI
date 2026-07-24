@@ -114,33 +114,65 @@ describe("conversation message orchestration API", () => {
   });
 
   describe("provider/mode capability enforcement", () => {
-    it("rejects an explicit Claude IMPLEMENT request before queueing instead of downgrading it", async () => {
-      const conversation = await createConversation(projectId, "Claude implement rejected");
+    it("accepts an explicit Claude IMPLEMENT request and grants it workspace-write", async () => {
+      const conversation = await createConversation(projectId, "Claude implement accepted");
       const response = await postJson(conversation.id, { content: "please implement this", provider: "claude-cli", mode: "IMPLEMENT" });
-      expect(response.status).toBe(409);
+      expect(response.status).toBe(202);
       const body = await response.json();
-      expect(body.error).toMatch(/claude-cli does not support IMPLEMENT/i);
-      const messages = await prisma.conversationMessage.findMany({ where: { conversationId: conversation.id } });
-      expect(messages).toHaveLength(0);
+      expect(body.selectedProvider).toBe("claude-cli");
+      const agentSession = await prisma.agentSession.findUniqueOrThrow({ where: { id: body.queuedExecution.agentSessionId } });
+      expect(agentSession.capability).toBe("WORKSPACE_WRITE");
     });
 
     it("allows an explicit Codex IMPLEMENT request", async () => {
       const conversation = await createConversation(projectId, "Codex implement allowed");
       const response = await postJson(conversation.id, { content: "please implement this", provider: "codex-cli", mode: "IMPLEMENT" });
       expect(response.status).toBe(202);
+      const body = await response.json();
+      const agentSession = await prisma.agentSession.findUniqueOrThrow({ where: { id: body.queuedExecution.agentSessionId } });
+      expect(agentSession.capability).toBe("WORKSPACE_WRITE");
     });
 
-    it("auto-routes IMPLEMENT to Codex even when Claude is the current provider", async () => {
-      const conversation = await createConversation(projectId, "Auto implement skips incapable Claude");
+    it("rejects an explicit Claude IMPLEMENT request when Claude is unavailable, with a clear error", async () => {
+      await setProviderHealth("claude-cli", { authentication: "RATE_LIMITED", available: false });
+      const conversation = await createConversation(projectId, "Claude implement unavailable");
+      const response = await postJson(conversation.id, { content: "please implement this", provider: "claude-cli", mode: "IMPLEMENT" });
+      expect(response.status).toBe(409);
+      const body = await response.json();
+      expect(body.error).toMatch(/claude-cli/i);
+      const messages = await prisma.conversationMessage.findMany({ where: { conversationId: conversation.id } });
+      expect(messages).toHaveLength(0);
+    });
+
+    it("auto-routes IMPLEMENT to the current healthy provider, now including Claude", async () => {
+      const conversation = await createConversation(projectId, "Auto implement prefers current Claude");
       await createAssistantMessage({ conversationId: conversation.id, providerId: "claude-cli", mode: "ASK", content: "prior reply" });
+      const response = await postJson(conversation.id, { content: "please implement this", provider: "auto", mode: "IMPLEMENT" });
+      expect(response.status).toBe(202);
+      const body = await response.json();
+      expect(body.selectedProvider).toBe("claude-cli");
+    });
+
+    it("still auto-routes IMPLEMENT to Codex when there is no prior provider and Codex is first in order", async () => {
+      const conversation = await createConversation(projectId, "Auto implement default order");
       const response = await postJson(conversation.id, { content: "please implement this", provider: "auto", mode: "IMPLEMENT" });
       expect(response.status).toBe(202);
       const body = await response.json();
       expect(body.selectedProvider).toBe("codex-cli");
     });
 
-    it("refuses auto IMPLEMENT when Codex is unavailable, even though Claude is healthy", async () => {
+    it("falls back auto IMPLEMENT to Claude when Codex is unavailable", async () => {
       await setProviderHealth("codex-cli", { available: false });
+      const conversation = await createConversation(projectId, "Auto implement falls back to Claude");
+      const response = await postJson(conversation.id, { content: "please implement this", provider: "auto", mode: "IMPLEMENT" });
+      expect(response.status).toBe(202);
+      const body = await response.json();
+      expect(body.selectedProvider).toBe("claude-cli");
+    });
+
+    it("refuses auto IMPLEMENT when neither provider is available", async () => {
+      await setProviderHealth("codex-cli", { available: false });
+      await setProviderHealth("claude-cli", { available: false });
       const conversation = await createConversation(projectId, "Auto implement no capable provider");
       const response = await postJson(conversation.id, { content: "please implement this", provider: "auto", mode: "IMPLEMENT" });
       expect(response.status).toBe(409);
@@ -148,12 +180,37 @@ describe("conversation message orchestration API", () => {
       expect(messages).toHaveLength(0);
     });
 
-    it("still allows Claude for ASK, REVIEW, and VERIFY", async () => {
+    it("still allows Claude for ASK, REVIEW, and VERIFY as read-only", async () => {
       for (const mode of ["ASK", "REVIEW", "VERIFY"] as const) {
         const conversation = await createConversation(projectId, `Claude ${mode} allowed`);
         const response = await postJson(conversation.id, { content: "hello", provider: "claude-cli", mode });
         expect(response.status).toBe(202);
+        const body = await response.json();
+        const agentSession = await prisma.agentSession.findUniqueOrThrow({ where: { id: body.queuedExecution.agentSessionId } });
+        expect(agentSession.capability).toBe("READ_ONLY");
       }
+    });
+
+    it("rejects an unknown/unsupported provider outright", async () => {
+      const conversation = await createConversation(projectId, "Unknown provider rejected");
+      const response = await postJson(conversation.id, { content: "hello", provider: "gpt-4", mode: "ASK" });
+      expect(response.status).toBe(400);
+    });
+
+    it("cannot have the browser elevate capability by sending extra fields in the request body", async () => {
+      const conversation = await createConversation(projectId, "Browser cannot elevate capability");
+      const response = await postJson(conversation.id, {
+        content: "please review this only",
+        provider: "claude-cli",
+        mode: "REVIEW",
+        capability: "WORKSPACE_WRITE",
+        allowedTools: ["Edit", "Write"],
+        permissionMode: "bypassPermissions",
+      });
+      expect(response.status).toBe(202);
+      const body = await response.json();
+      const agentSession = await prisma.agentSession.findUniqueOrThrow({ where: { id: body.queuedExecution.agentSessionId } });
+      expect(agentSession.capability).toBe("READ_ONLY");
     });
   });
 

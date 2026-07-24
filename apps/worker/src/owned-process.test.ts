@@ -173,6 +173,84 @@ describe("owned Windows provider process trees", () => {
     }
   }, 20_000);
 
+  it("terminates the exact recorded Claude workspace-write process tree on cancellation, without touching a sibling", async () => {
+    const project = await prisma.project.create({
+      data: {
+        name: `owned-tree-claude-cancel-${randomUUID()}`,
+        repositoryPath: `/tmp/owned-tree-claude-cancel-${randomUUID()}`,
+        allowedCommands: [],
+        permittedPaths: [],
+        isVerification: true,
+      },
+    });
+    const conversation = await prisma.conversation.create({ data: { projectId: project.id, title: "Claude cancellation" } });
+    const queued = await queueConversationMessage({
+      conversationId: conversation.id,
+      projectId: project.id,
+      content: "implement the fixture change",
+      mode: "IMPLEMENT",
+      selectedProviderId: "claude-cli",
+      reason: "test",
+      providerHealthSnapshot: {},
+      previousAssistantMessage: null,
+      idempotencyKey: randomUUID(),
+    });
+    expect(queued.agentSession.capability).toBe("WORKSPACE_WRITE");
+    const root = spawnFixture("root");
+    const sibling = spawnFixture("sibling");
+    let rootPids: TreePids | undefined;
+    let owned: Awaited<ReturnType<typeof captureOwnedProcess>> | undefined;
+
+    try {
+      rootPids = await readTree(root);
+      owned = await captureOwnedProcess({
+        rootPid: rootPids.rootPid,
+        agentSessionId: queued.agentSession.id,
+        providerId: "claude-cli",
+        workerId: "fixture-worker",
+      });
+      await prisma.agentSession.update({
+        where: { id: queued.agentSession.id },
+        data: {
+          state: "RUNNING",
+          workerId: "fixture-worker",
+          providerRootPid: owned.rootPid,
+          providerProcessStartedAt: new Date(owned.startedAt),
+          providerProcessStartIdentity: owned.startedAt,
+        },
+      });
+
+      expect(await terminateRecordedProviderProcess({
+        agentSessionId: queued.agentSession.id,
+        workerId: "fixture-worker",
+        reason: "CANCELLED",
+        targetState: "CANCELLED",
+        failureCode: "PROVIDER_CANCELLED",
+      })).toBe("TERMINATED");
+      await Promise.all([waitForExit(rootPids.rootPid), waitForExit(rootPids.childPid), waitForExit(rootPids.grandchildPid)]);
+      expect(await processExists(sibling.pid!)).toBe(true);
+      const session = await prisma.agentSession.findUniqueOrThrow({ where: { id: queued.agentSession.id } });
+      expect(session.state).toBe("CANCELLED");
+      expect(session.failureCode).toBe("PROVIDER_CANCELLED");
+      expect(session.providerTerminationReason).toBe("CANCELLED");
+      expect(session.providerTerminationResult).toBe("TERMINATED");
+      const assistants = await prisma.conversationMessage.findMany({ where: { agentSessionId: queued.agentSession.id, status: "COMPLETED" } });
+      expect(assistants).toHaveLength(0);
+    } finally {
+      if (owned && rootPids && (await processExists(rootPids.rootPid))) {
+        await terminateOwnedProcessTree({
+          rootPid: owned.rootPid,
+          expectedStartIdentity: owned.startedAt,
+          agentSessionId: queued.agentSession.id,
+          reason: "CANCELLED",
+        }).catch(() => undefined);
+      }
+      sibling.kill();
+      if (sibling.pid) await waitForExit(sibling.pid).catch(() => undefined);
+      await prisma.project.delete({ where: { id: project.id } }).catch(() => undefined);
+    }
+  }, 20_000);
+
   it("refuses a PID with a mismatched start identity and safely handles an already-exited tree", async () => {
     const child = spawnFixture("sibling");
     const owned = await captureOwnedProcess({

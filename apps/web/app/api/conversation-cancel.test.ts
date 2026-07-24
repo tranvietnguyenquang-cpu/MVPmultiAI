@@ -1,7 +1,6 @@
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
 import { randomUUID } from "node:crypto";
-import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { promisify } from "node:util";
 import { NextRequest } from "next/server";
@@ -16,7 +15,10 @@ import { POST as postCancel } from "./conversations/[id]/executions/[executionId
 const ORIGIN = "http://localhost:3300";
 const CSRF_TOKEN = "test-cancel-csrf-token";
 const execFileAsync = promisify(execFile);
-const fixture = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "worker", "src", "owned-process.fixture.cjs");
+// apps/web is CommonJS for tsc's project-level type-checking purposes (no "type":"module"
+// in its package.json), so import.meta.url is not usable here - __dirname is the
+// CommonJS-safe equivalent, and Vitest's own ESM runtime shims it for compatibility.
+const fixture = path.join(__dirname, "..", "..", "..", "worker", "src", "owned-process.fixture.cjs");
 
 function cancelRequest(conversationId: string, executionId: string, projectId: string) {
   const headers = new Headers();

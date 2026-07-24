@@ -29,6 +29,7 @@
     "smoke:claude": "tsx scripts/smoke-provider.ts claude-cli",
     "smoke:session:codex": "tsx scripts/smoke-provider-session.ts codex-cli",
     "smoke:session:claude": "tsx scripts/smoke-provider-session.ts claude-cli",
+    "smoke:claude:implement": "tsx scripts/smoke-claude-implement.ts",
     "db:generate": "prisma generate --schema packages/database/prisma/schema.prisma",
     "db:migrate": "prisma migrate deploy --schema packages/database/prisma/schema.prisma",
     "worker": "npm run start -w @project-relay/worker"

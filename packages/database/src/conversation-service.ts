@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { getProviderModeCapability } from "@project-relay/shared";
+import { getProviderModeCapability, resolveExecutionCapability, type ExecutionCapability } from "@project-relay/shared";
 import { Prisma, prisma } from "./index.js";
 import { createOutboxEventWithClient } from "./outbox-service.js";
 const HANDOFF_MAX_BYTES=32_768;
@@ -78,8 +78,17 @@ export async function queueConversationMessage(input:QueueConversationMessageInp
 
     const taskId=input.taskId??(await tx.task.create({data:{projectId:input.projectId,title:input.content.slice(0,160)||"Conversation message",userRequest:input.content,objective:input.content.slice(0,2_000),relevantFiles:[],constraints:[],prohibitedChanges:[],assignedProvider:input.selectedProviderId}})).id;
 
+    // CONTINUE inheritance (Claude only - see resolveExecutionCapability) needs the
+    // capability of the most recent prior execution for this exact provider in this
+    // conversation, never a browser-supplied value.
+    const continuedCapability=input.mode==="CONTINUE"
+      ?(await tx.agentSession.findFirst({where:{conversationId:input.conversationId,providerId:input.selectedProviderId,capability:{not:null}},orderBy:{createdAt:"desc"},select:{capability:true}}))?.capability as ExecutionCapability|null|undefined
+      :undefined;
+    const capability=resolveExecutionCapability(input.selectedProviderId,input.mode,continuedCapability);
+    if(!capability)throw new Error(`${input.selectedProviderId} does not support ${input.mode} execution.`);
+
     const purpose=agentSessionPurpose(input.mode);
-    const agentSession=await tx.agentSession.create({data:{projectId:input.projectId,taskId,providerId:input.selectedProviderId,state:"QUEUED",purpose,readOnly:purpose!=="IMPLEMENTATION",providerSessionId:providerSession.id,conversationId:input.conversationId}});
+    const agentSession=await tx.agentSession.create({data:{projectId:input.projectId,taskId,providerId:input.selectedProviderId,state:"QUEUED",purpose,readOnly:purpose!=="IMPLEMENTATION",capability,providerSessionId:providerSession.id,conversationId:input.conversationId}});
 
     const userMessage=await tx.conversationMessage.create({data:{conversationId:input.conversationId,role:"USER",mode:input.mode,content:input.content,status:"COMPLETED",idempotencyKey:input.idempotencyKey,...(input.taskId?{taskId:input.taskId}:{})}});
 
@@ -144,7 +153,15 @@ export async function retryConversationExecution(input:{executionId:string;provi
     if(!getProviderModeCapability(input.providerId,original.userMessage.mode))throw new Error(`${input.providerId} does not support ${original.userMessage.mode} execution.`);
     const active=await tx.agentSession.findFirst({where:{conversationId:original.conversationId,userMessageId:original.userMessageId,providerId:input.providerId,state:{in:["QUEUED","STARTING","RUNNING"]}}});if(active)return active;
     const ps=await tx.providerSession.findFirst({where:{conversationId:original.conversationId,providerId:input.providerId,status:"RUNNING"},orderBy:{startedAt:"desc"}})??await tx.providerSession.create({data:{conversationId:original.conversationId,providerId:input.providerId,status:"RUNNING",startedAt:new Date()}});
-    const retry=await tx.agentSession.create({data:{projectId:original.projectId,taskId:original.taskId,providerId:input.providerId,state:"QUEUED",purpose:original.purpose,readOnly:original.readOnly,providerSessionId:ps.id,conversationId:original.conversationId,userMessageId:original.userMessageId}});
+    // Re-resolve rather than blindly copying original.capability: a retry can switch
+    // provider (input.providerId vs original.providerId), so CONTINUE inheritance must
+    // look at the target provider's own most recent execution, not the original's.
+    const continuedCapability=original.userMessage.mode==="CONTINUE"
+      ?(await tx.agentSession.findFirst({where:{conversationId:original.conversationId,providerId:input.providerId,capability:{not:null}},orderBy:{createdAt:"desc"},select:{capability:true}}))?.capability as ExecutionCapability|null|undefined
+      :undefined;
+    const capability=resolveExecutionCapability(input.providerId,original.userMessage.mode,continuedCapability);
+    if(!capability)throw new Error(`${input.providerId} does not support ${original.userMessage.mode} execution.`);
+    const retry=await tx.agentSession.create({data:{projectId:original.projectId,taskId:original.taskId,providerId:input.providerId,state:"QUEUED",purpose:original.purpose,readOnly:original.readOnly,capability,providerSessionId:ps.id,conversationId:original.conversationId,userMessageId:original.userMessageId}});
     const routing=await tx.routingDecision.create({data:{conversationId:original.conversationId,userMessageId:original.userMessageId,requestedProviderId:input.providerId,selectedProviderId:input.providerId,reason:"User-requested retry",providerHealthSnapshot:{retryOf:original.id,idempotencyKey:input.idempotencyKey}}});
     const prior=await tx.conversationMessage.findFirst({where:{conversationId:original.conversationId,role:"ASSISTANT"},orderBy:{createdAt:"desc"}});
     const handoff=prior?.providerId&&prior.providerId!==input.providerId?await createHandoffCapsuleWithClient(tx,{conversationId:original.conversationId,fromProviderId:prior.providerId,toProviderId:input.providerId,objective:original.userMessage.content.slice(0,2000),relevantDecisions:{},filesChanged:{},gitBaseline:{},gitDiffSummary:"",tests:{},unresolvedIssues:{},acceptedFindings:{},sourceMessageRange:{fromMessageId:prior.id,toMessageId:original.userMessageId!}}):null;

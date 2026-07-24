@@ -393,6 +393,11 @@ model AgentSession {
   baselineDiffHash String?
   purpose     String @default("IMPLEMENTATION")
   readOnly    Boolean @default(false)
+  /// The resolved ExecutionCapability ("READ_ONLY" | "WORKSPACE_WRITE") actually granted
+  /// to this execution, persisted once at queue time so CONTINUE mode can later inherit
+  /// it exactly rather than re-deriving it from the mode alone. Nullable only for rows
+  /// created before this column existed.
+  capability  String?
   providerSessionId String?
   providerSession ProviderSession? @relation(fields:[providerSessionId],references:[id],onDelete:SetNull)
   conversationId String?

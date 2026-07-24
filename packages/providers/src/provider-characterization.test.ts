@@ -1,4 +1,5 @@
 import { EventEmitter } from "node:events";
+import { tmpdir } from "node:os";
 import { PassThrough } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -108,11 +109,50 @@ describe("provider runtime characterization", () => {
       "claude-session-1",
     ]));
     expect(calls[0]!.args).not.toContain("workspace-write");
-    await expect(provider.createSession({
+    const allowedSection = calls[0]!.args.slice(calls[0]!.args.indexOf("--allowedTools") + 1, calls[0]!.args.indexOf("--disallowedTools"));
+    expect(allowedSection).not.toContain("Edit");
+    expect(allowedSection).not.toContain("Write");
+  });
+
+  it("grants Claude Edit/Write only for a workspace-write session, alongside the same restricted Bash command set", async () => {
+    const calls: SpawnCall[] = [];
+    const provider = new ClaudeCliProvider(recordingSpawn(calls), resolver);
+    const session = await provider.createSession({
       workspace: "C:\\MVPmultiAI",
       taskId: "task-3",
       capability: "WORKSPACE_WRITE",
-    })).rejects.toThrow(/does not support/i);
+    });
+
+    await provider.startSession(session, {} as never);
+
+    expect(calls[0]!.args).toEqual(expect.arrayContaining([
+      "--allowedTools",
+      "Edit",
+      "Write",
+      "Bash(npm test:*)",
+      "Bash(npm run typecheck:*)",
+      "Bash(npm run lint:*)",
+      "Bash(npm run build:*)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+    ]));
+    expect(calls[0]!.args).not.toContain("--dangerously-skip-permissions");
+    expect(calls[0]!.args).not.toContain("--allow-dangerously-skip-permissions");
+    for (const forbidden of ["npm install", "npm ci", "git commit", "git push", "DROP TABLE", "DELETE FROM"]) {
+      expect(calls[0]!.args.join(" ")).not.toContain(forbidden);
+    }
+  });
+
+  it("preserves workspace realpath containment for a Claude workspace-write session: a non-git directory is refused before any process spawns", async () => {
+    const calls: SpawnCall[] = [];
+    const provider = new ClaudeCliProvider(recordingSpawn(calls), resolver);
+
+    await expect(provider.createSession({
+      workspace: tmpdir(),
+      taskId: "task-escape",
+      capability: "WORKSPACE_WRITE",
+    })).rejects.toThrow(/git repository/i);
+    expect(calls).toHaveLength(0);
   });
 
   it("preserves existing authentication error classification", () => {

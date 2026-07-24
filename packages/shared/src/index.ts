@@ -68,18 +68,40 @@ export type ExecutionCapability = "READ_ONLY" | "WORKSPACE_WRITE";
 
 /**
  * The authoritative provider/mode capability matrix. Only IMPLEMENT ever grants
- * workspace-write, and only Codex supports it: Claude has no safe workspace-write
- * sandbox in this build, so Claude+IMPLEMENT is absent (unsupported) rather than
- * silently downgraded. Every other combination is read-only at the CLI layer.
+ * workspace-write. Codex uses its own OS-level sandbox for this; Claude uses its
+ * own tool-permission allowlist (see claude-cli-provider.ts) - never an unrestricted
+ * permission bypass. Every other combination is read-only at the CLI layer.
+ *
+ * CONTINUE is intentionally READ_ONLY here: this matrix is the static per-mode
+ * default, used directly for Codex (whose CONTINUE behavior is unchanged) and as
+ * the fallback for Claude when there is no prior execution to inherit from. Claude's
+ * actual CONTINUE capability is resolved dynamically by resolveExecutionCapability
+ * below, which inherits the capability of the execution being continued.
  */
 const PROVIDER_MODE_CAPABILITY: Record<"codex-cli" | "claude-cli", Partial<Record<ConversationModeValue, ExecutionCapability>>> = {
   "codex-cli": { ASK: "READ_ONLY", REVIEW: "READ_ONLY", VERIFY: "READ_ONLY", CONTINUE: "READ_ONLY", IMPLEMENT: "WORKSPACE_WRITE" },
-  "claude-cli": { ASK: "READ_ONLY", REVIEW: "READ_ONLY", VERIFY: "READ_ONLY", CONTINUE: "READ_ONLY" }
+  "claude-cli": { ASK: "READ_ONLY", REVIEW: "READ_ONLY", VERIFY: "READ_ONLY", CONTINUE: "READ_ONLY", IMPLEMENT: "WORKSPACE_WRITE" }
 };
 
 /** Returns null for a provider/mode combination that must be rejected before queueing. */
 export function getProviderModeCapability(providerId: string, mode: string): ExecutionCapability | null {
   return PROVIDER_MODE_CAPABILITY[providerId as "codex-cli" | "claude-cli"]?.[mode as ConversationModeValue] ?? null;
+}
+
+/**
+ * Resolves the *effective* capability for a queued execution. Only Claude's CONTINUE
+ * mode ever deviates from the static matrix above: it inherits the capability of the
+ * execution being continued (e.g. continuing a Claude IMPLEMENT run stays
+ * workspace-write; continuing a Claude ASK/REVIEW/VERIFY run stays read-only), falling
+ * back to the matrix default (read-only) when there is nothing to continue. Codex's
+ * CONTINUE behavior is deliberately unchanged: it always reads from the static matrix,
+ * ignoring `continuedCapability`.
+ */
+export function resolveExecutionCapability(providerId: string, mode: string, continuedCapability?: ExecutionCapability | null): ExecutionCapability | null {
+  if (providerId === "claude-cli" && mode === "CONTINUE") {
+    return continuedCapability ?? getProviderModeCapability(providerId, mode);
+  }
+  return getProviderModeCapability(providerId, mode);
 }
 
 export function listProviderModeCapabilities(): Array<{ providerId: "codex-cli" | "claude-cli"; mode: ConversationModeValue; capability: ExecutionCapability | null }> {
