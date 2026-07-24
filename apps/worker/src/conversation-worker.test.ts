@@ -130,7 +130,8 @@ describe("conversation worker execution", () => {
         name: `conversation-worker-test-${randomUUID()}`,
         repositoryPath: `/tmp/conversation-worker-test-${randomUUID()}`,
         allowedCommands: [],
-        permittedPaths: []
+        permittedPaths: [],
+        isVerification: true
       }
     });
     projectId = project.id;
@@ -464,7 +465,7 @@ describe("safe provider session resume", () => {
 
   beforeAll(async () => {
     const project = await prisma.project.create({
-      data: { name: `conversation-resume-test-${randomUUID()}`, repositoryPath: `/tmp/conversation-resume-test-${randomUUID()}`, allowedCommands: [], permittedPaths: [] }
+      data: { name: `conversation-resume-test-${randomUUID()}`, repositoryPath: `/tmp/conversation-resume-test-${randomUUID()}`, allowedCommands: [], permittedPaths: [], isVerification: true }
     });
     projectId = project.id;
   });

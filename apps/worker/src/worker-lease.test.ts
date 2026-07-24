@@ -8,7 +8,7 @@ describe("worker ownership, leases, and safe crash recovery", () => {
 
   beforeAll(async () => {
     const project = await prisma.project.create({
-      data: { name: `worker-lease-test-${randomUUID()}`, repositoryPath: `/tmp/worker-lease-test-${randomUUID()}`, allowedCommands: [], permittedPaths: [] }
+      data: { name: `worker-lease-test-${randomUUID()}`, repositoryPath: `/tmp/worker-lease-test-${randomUUID()}`, allowedCommands: [], permittedPaths: [], isVerification: true }
     });
     projectId = project.id;
   });
@@ -152,7 +152,7 @@ describe("worker ownership, leases, and safe crash recovery", () => {
     });
 
     it("treats a session that was never leased (older non-conversation flow) as eligible for reclaim", async () => {
-      const project = await prisma.project.create({ data: { name: `worker-lease-legacy-${randomUUID()}`, repositoryPath: `/tmp/worker-lease-legacy-${randomUUID()}`, allowedCommands: [], permittedPaths: [] } });
+      const project = await prisma.project.create({ data: { name: `worker-lease-legacy-${randomUUID()}`, repositoryPath: `/tmp/worker-lease-legacy-${randomUUID()}`, allowedCommands: [], permittedPaths: [], isVerification: true } });
       const task = await prisma.task.create({ data: { projectId: project.id, title: "Legacy task", userRequest: "x", objective: "x", relevantFiles: [], constraints: [], prohibitedChanges: [], assignedProvider: "codex-cli" } });
       const session = await prisma.agentSession.create({ data: { projectId: project.id, taskId: task.id, providerId: "codex-cli", state: "RUNNING" } }); // no workerId/leaseExpiresAt ever set
 

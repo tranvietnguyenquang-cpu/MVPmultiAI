@@ -16,7 +16,8 @@ describe("conversation execution-state API authorization", () => {
         name: `conversation-worker-exec-test-${randomUUID()}`,
         repositoryPath: `/tmp/conversation-worker-exec-test-${randomUUID()}`,
         allowedCommands: [],
-        permittedPaths: []
+        permittedPaths: [],
+        isVerification: true
       }
     });
     projectId = project.id;
@@ -25,7 +26,8 @@ describe("conversation execution-state API authorization", () => {
         name: `conversation-worker-exec-other-${randomUUID()}`,
         repositoryPath: `/tmp/conversation-worker-exec-other-${randomUUID()}`,
         allowedCommands: [],
-        permittedPaths: []
+        permittedPaths: [],
+        isVerification: true
       }
     });
     otherProjectId = otherProject.id;

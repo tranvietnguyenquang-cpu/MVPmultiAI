@@ -149,6 +149,56 @@ export function isLoopbackRequestHeaders(input: { host: string | null; forwarded
   return true;
 }
 
+/**
+ * Automated tests must never be able to mutate the real local-beta database/Redis (or any
+ * other unrelated project's), even by accident. Both allowlists below are intentionally
+ * positive-match only ("must look disposable") rather than a denylist of known-bad names:
+ * a denylist has to be told about every real database it must protect, while an allowlist
+ * refuses everything by default and only lets through what was explicitly provisioned for
+ * throwaway test/verification use.
+ */
+const DISPOSABLE_DATABASE_NAME_PATTERN = /^projectrelay_(?:test|validation|e2e)_[a-z0-9_]+$/;
+
+export function isDisposableDatabaseName(name: string): boolean {
+  return DISPOSABLE_DATABASE_NAME_PATTERN.test(name.trim().toLowerCase());
+}
+
+/** Throws before any database mutation unless the URL is loopback-only and names an explicitly disposable database (e.g. `projectrelay_test_verification`). */
+export function assertDisposableDatabaseUrl(rawUrl: string | undefined, context = "DATABASE_URL"): void {
+  if (!rawUrl) throw new Error(`${context} is required and must point at a disposable test database (e.g. projectrelay_test_*).`);
+  let parsed: URL;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    throw new Error(`${context} is not a valid connection string.`);
+  }
+  assertLoopbackHost(parsed.hostname, context);
+  const databaseName = decodeURIComponent(parsed.pathname.replace(/^\//, ""));
+  if (!isDisposableDatabaseName(databaseName)) {
+    throw new Error(
+      `Refusing to run automated tests against database '${databaseName}'. ${context} must name a disposable database matching projectrelay_test_*, projectrelay_validation_*, or projectrelay_e2e_* - never 'projectrelay' (local-beta), 'WebManageSchool', or any other non-disposable database.`
+    );
+  }
+}
+
+const DISPOSABLE_REDIS_PORTS = new Set(["56379"]);
+
+/** Throws unless the URL is loopback-only and uses the dedicated disposable test Redis port - never the local-beta (6380) or any other project's (e.g. 6379) Redis. */
+export function assertDisposableRedisUrl(rawUrl: string | undefined, context = "REDIS_URL"): void {
+  if (!rawUrl) throw new Error(`${context} is required and must point at the disposable test Redis instance.`);
+  let parsed: URL;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    throw new Error(`${context} is not a valid connection string.`);
+  }
+  assertLoopbackHost(parsed.hostname, context);
+  const port = parsed.port || "6379";
+  if (!DISPOSABLE_REDIS_PORTS.has(port)) {
+    throw new Error(`Refusing to run automated tests against Redis port ${port}. ${context} must point at the dedicated disposable test Redis port (56379), never the local-beta or any other project's Redis.`);
+  }
+}
+
 export type LockedDecisionRule = { id: string; forbiddenPaths: string[]; requiredPatterns: string[] };
 function globPattern(pattern: string): RegExp {
   const escaped=pattern.replace(/[.+^${}()|[\]\\]/g,"\\$&").replace(/\*\*/g,".*").replace(/\*/g,"[^/]*");

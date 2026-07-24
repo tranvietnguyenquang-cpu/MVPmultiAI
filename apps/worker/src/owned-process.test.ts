@@ -104,6 +104,7 @@ describe("owned Windows provider process trees", () => {
         repositoryPath: `/tmp/owned-tree-timeout-${randomUUID()}`,
         allowedCommands: [],
         permittedPaths: [],
+        isVerification: true,
       },
     });
     const conversation = await prisma.conversation.create({ data: { projectId: project.id, title: "Owned timeout" } });

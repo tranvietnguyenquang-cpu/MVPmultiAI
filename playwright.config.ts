@@ -4,8 +4,12 @@ import { defineConfig, devices } from "@playwright/test";
 
 /**
  * Minimal .env loader (no dotenv dependency): the disposable Postgres/Redis stack's
- * connection details live in the repo-root .env, and both this config's own process and
- * the Next.js server it spawns need them.
+ * connection details live in .env.test - deliberately never the repo-root .env, which
+ * holds the same DATABASE_URL/REDIS_URL `npm run dev:local` uses for the real local-beta
+ * stack. Merely importing @prisma/client auto-loads that root .env for any variable not
+ * already set in process.env, so both this config's own process and the Next.js server it
+ * spawns must have DATABASE_URL/REDIS_URL set here first, before anything gets a chance to
+ * fall back to it.
  */
 function loadDotEnv(file: string): void {
   let text: string;
@@ -22,7 +26,11 @@ function loadDotEnv(file: string): void {
     process.env[key] = rawValue.replace(/^["']|["']$/g, "");
   }
 }
-loadDotEnv(path.resolve(__dirname, ".env"));
+loadDotEnv(path.resolve(__dirname, ".env.test"));
+// Explicit, not merely inherited: this is the fail-closed signal packages/database and
+// apps/web/lib/redis.ts require before they'll allow a client to be constructed at all
+// (see the shared assertDisposableDatabaseUrl/assertDisposableRedisUrl checks there).
+process.env.PROJECT_RELAY_TEST_MODE = "true";
 
 const PORT = process.env.PROJECT_RELAY_E2E_PORT ?? "3300";
 // Next.js's own NextRequest.nextUrl.origin always reports "http://localhost:<port>"
@@ -52,7 +60,9 @@ export default defineConfig({
       PORT,
       PROJECT_RELAY_BIND_HOST: "127.0.0.1",
       DATABASE_URL: process.env.DATABASE_URL ?? "",
-      REDIS_URL: process.env.REDIS_URL ?? ""
+      REDIS_URL: process.env.REDIS_URL ?? "",
+      PROJECT_RELAY_TEST_MODE: "true",
+      PROJECT_RELAY_QUEUE_PREFIX: process.env.PROJECT_RELAY_QUEUE_PREFIX ?? "projectrelay-test"
     }
   },
   projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }]

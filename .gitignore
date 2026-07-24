@@ -12,6 +12,7 @@ coverage/
 
 .env.*
 !.env.example
+!.env.test
 *.pem
 *.key
 *.pfx

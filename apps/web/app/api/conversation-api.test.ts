@@ -42,6 +42,7 @@ describe("conversation CRUD API", () => {
         repositoryPath: `/tmp/conversation-api-test-${randomUUID()}`,
         allowedCommands: [],
         permittedPaths: [],
+        isVerification: true,
       },
     });
     projectId = project.id;
@@ -52,6 +53,7 @@ describe("conversation CRUD API", () => {
         repositoryPath: `/tmp/conversation-api-test-other-${randomUUID()}`,
         allowedCommands: [],
         permittedPaths: [],
+        isVerification: true,
       },
     });
     otherProjectId = otherProject.id;

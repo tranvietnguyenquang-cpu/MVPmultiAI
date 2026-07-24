@@ -29,7 +29,7 @@ describe("concurrent conversation submissions", () => {
 
   beforeAll(async () => {
     const project = await prisma.project.create({
-      data: { name: `concurrency-test-${randomUUID()}`, repositoryPath: `/tmp/concurrency-test-${randomUUID()}`, allowedCommands: [], permittedPaths: [] }
+      data: { name: `concurrency-test-${randomUUID()}`, repositoryPath: `/tmp/concurrency-test-${randomUUID()}`, allowedCommands: [], permittedPaths: [], isVerification: true }
     });
     projectId = project.id;
     const session = await prisma.localSession.create({ data: { token: `test-session-${randomUUID()}` } });

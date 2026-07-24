@@ -28,7 +28,7 @@ describe("conversation API response sanitization", () => {
 
   beforeAll(async () => {
     const project = await prisma.project.create({
-      data: { name: `sanitization-test-${randomUUID()}`, repositoryPath: `/tmp/sanitization-test-${randomUUID()}`, allowedCommands: [], permittedPaths: [] }
+      data: { name: `sanitization-test-${randomUUID()}`, repositoryPath: `/tmp/sanitization-test-${randomUUID()}`, allowedCommands: [], permittedPaths: [], isVerification: true }
     });
     projectId = project.id;
     const session = await prisma.localSession.create({ data: { token: `test-session-${randomUUID()}` } });

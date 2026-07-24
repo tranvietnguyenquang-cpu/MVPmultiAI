@@ -9,7 +9,7 @@ describe("transactional outbox", () => {
 
   beforeAll(async () => {
     const project = await prisma.project.create({
-      data: { name: `outbox-test-${randomUUID()}`, repositoryPath: `/tmp/outbox-test-${randomUUID()}`, allowedCommands: [], permittedPaths: [] }
+      data: { name: `outbox-test-${randomUUID()}`, repositoryPath: `/tmp/outbox-test-${randomUUID()}`, allowedCommands: [], permittedPaths: [], isVerification: true }
     });
     projectId = project.id;
   });

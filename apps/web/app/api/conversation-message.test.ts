@@ -59,6 +59,7 @@ describe("conversation message orchestration API", () => {
         repositoryPath: `/tmp/conversation-message-test-${randomUUID()}`,
         allowedCommands: [],
         permittedPaths: [],
+        isVerification: true,
       },
     });
     projectId = project.id;
@@ -318,6 +319,7 @@ describe("conversation message orchestration API", () => {
           repositoryPath: `/tmp/archived-project-${randomUUID()}`,
           allowedCommands: [],
           permittedPaths: [],
+          isVerification: true,
           archivedAt: new Date(),
         },
       });

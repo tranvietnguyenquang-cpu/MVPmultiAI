@@ -82,11 +82,11 @@ describe("conversation worker relationship validation", () => {
 
   beforeAll(async () => {
     const project = await prisma.project.create({
-      data: { name: `worker-relationships-${randomUUID()}`, repositoryPath: `/tmp/worker-relationships-${randomUUID()}`, allowedCommands: [], permittedPaths: [] }
+      data: { name: `worker-relationships-${randomUUID()}`, repositoryPath: `/tmp/worker-relationships-${randomUUID()}`, allowedCommands: [], permittedPaths: [], isVerification: true }
     });
     projectId = project.id;
     const otherProject = await prisma.project.create({
-      data: { name: `worker-relationships-other-${randomUUID()}`, repositoryPath: `/tmp/worker-relationships-other-${randomUUID()}`, allowedCommands: [], permittedPaths: [] }
+      data: { name: `worker-relationships-other-${randomUUID()}`, repositoryPath: `/tmp/worker-relationships-other-${randomUUID()}`, allowedCommands: [], permittedPaths: [], isVerification: true }
     });
     otherProjectId = otherProject.id;
   });

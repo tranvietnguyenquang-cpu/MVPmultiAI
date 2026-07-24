@@ -4,9 +4,16 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import crossSpawn from "cross-spawn";
+import { assertDisposableDatabaseUrl, assertDisposableRedisUrl } from "@project-relay/shared";
+import { ensureDisposablePostgresDatabase, migrateDisposableDatabase } from "../scripts/test-infra/ensure-disposable-database.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
+/**
+ * Minimal .env loader (no dotenv dependency): loads the disposable test database/Redis
+ * connection details from .env.test - deliberately never the repo-root .env, which holds
+ * the same DATABASE_URL/REDIS_URL `npm run dev:local` uses for the real local-beta stack.
+ */
 function loadDotEnv(file: string): void {
   let text: string;
   try {
@@ -22,7 +29,8 @@ function loadDotEnv(file: string): void {
     process.env[key] = rawValue.replace(/^["']|["']$/g, "");
   }
 }
-loadDotEnv(path.resolve(__dirname, "..", ".env"));
+loadDotEnv(path.resolve(__dirname, "..", ".env.test"));
+process.env.PROJECT_RELAY_TEST_MODE = "true";
 
 const WORKSPACE_MANIFEST = path.join(__dirname, ".e2e-workspace.json");
 
@@ -35,14 +43,18 @@ function run(command: string, args: string[], cwd?: string): Promise<void> {
 }
 
 export default async function globalSetup(): Promise<void> {
-  const repoRoot = path.resolve(__dirname, "..");
+  // Fails fast, before any container is touched or any row is written, if .env.test ever
+  // resolved to anything but an explicitly disposable database/Redis instance.
+  assertDisposableDatabaseUrl(process.env.DATABASE_URL);
+  assertDisposableRedisUrl(process.env.REDIS_URL);
 
   // Disposable Postgres + Redis, targeting the dedicated "projectrelay-validation" compose
   // project explicitly (idempotent: a no-op if already running). Never omit -p here: the
   // default project name is derived from the current directory and can collide with an
   // unrelated, already-running stack that happens to share a container name prefix.
-  await run("docker", ["compose", "-p", "projectrelay-validation", "-f", "docker-compose.yml", "-f", "docker-compose.validation.yml", "up", "-d", "--wait"], repoRoot);
-  await run("npx", ["prisma", "migrate", "deploy", "--schema", "packages/database/prisma/schema.prisma"], repoRoot);
+  const databaseName = decodeURIComponent(new URL(process.env.DATABASE_URL!).pathname.replace(/^\//, ""));
+  await ensureDisposablePostgresDatabase(databaseName);
+  await migrateDisposableDatabase(process.env.DATABASE_URL!);
 
   // A disposable Git workspace so seeded Projects have a real, valid repositoryPath.
   const workspace = mkdtempSync(path.join(tmpdir(), "project-relay-e2e-"));

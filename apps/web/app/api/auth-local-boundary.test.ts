@@ -28,11 +28,11 @@ describe("local-first authentication boundary", () => {
 
   beforeAll(async () => {
     const project = await prisma.project.create({
-      data: { name: `auth-boundary-${randomUUID()}`, repositoryPath: `/tmp/auth-boundary-${randomUUID()}`, allowedCommands: [], permittedPaths: [] }
+      data: { name: `auth-boundary-${randomUUID()}`, repositoryPath: `/tmp/auth-boundary-${randomUUID()}`, allowedCommands: [], permittedPaths: [], isVerification: true }
     });
     projectId = project.id;
     const otherProject = await prisma.project.create({
-      data: { name: `auth-boundary-other-${randomUUID()}`, repositoryPath: `/tmp/auth-boundary-other-${randomUUID()}`, allowedCommands: [], permittedPaths: [] }
+      data: { name: `auth-boundary-other-${randomUUID()}`, repositoryPath: `/tmp/auth-boundary-other-${randomUUID()}`, allowedCommands: [], permittedPaths: [], isVerification: true }
     });
     otherProjectId = otherProject.id;
   });

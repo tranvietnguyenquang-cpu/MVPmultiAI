@@ -38,6 +38,7 @@ describe("conversation service: database-backed operations", () => {
         repositoryPath: `/tmp/conversation-service-test-${randomUUID()}`,
         allowedCommands: [],
         permittedPaths: [],
+        isVerification: true,
       },
     });
     projectId = project.id;

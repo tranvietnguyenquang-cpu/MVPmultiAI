@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
+import { assertDisposableDatabaseUrl } from "@project-relay/shared";
 import { prisma } from "./index.js";
 import { commitVerificationCleanup, previewVerificationCleanup } from "./verification-cleanup.js";
 
@@ -8,11 +9,7 @@ let testRunId = "";
 let projectIds: string[] = [];
 
 function assertDisposableDatabase(): void {
-  const databaseUrl = new URL(process.env.DATABASE_URL ?? "");
-  const loopback = databaseUrl.hostname === "127.0.0.1" || databaseUrl.hostname === "localhost";
-  if (!loopback || databaseUrl.port !== "55432") {
-    throw new Error("Verification cleanup tests require the disposable validation database.");
-  }
+  assertDisposableDatabaseUrl(process.env.DATABASE_URL);
 }
 
 async function deleteTestRun(runId: string): Promise<void> {
