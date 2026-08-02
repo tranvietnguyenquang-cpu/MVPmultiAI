@@ -1,0 +1,151 @@
+generator client {
+  provider = "prisma-client-js"
+  output   = "../generated/client"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("RELAY_V2_DATABASE_URL")
+}
+
+model Project {
+  id              String   @id
+  name            String
+  slug            String   @unique
+  localPath       String
+  pathKey         String   @unique
+  description     String   @default("")
+  defaultExecutor String   @default("AUTO")
+  defaultReviewer String   @default("AUTO")
+  defaultModel    String   @default("AUTO")
+  defaultEffort   String   @default("AUTO")
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  tasks           Task[]
+  auditEvents     AuditEvent[]
+  importReports   ImportReport[]
+}
+
+model Task {
+  id                String   @id
+  projectId         String
+  project           Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  externalId        String?
+  idempotencyKey    String
+  title             String
+  objective         String
+  source            String
+  taskType          String
+  complexity        String
+  status            String   @default("DRAFT")
+  context           String   @default("")
+  suggestedExecutor String   @default("AUTO")
+  suggestedModel    String   @default("AUTO")
+  suggestedEffort   String   @default("AUTO")
+  selectedExecutor  String   @default("AUTO")
+  selectedModel     String   @default("AUTO")
+  selectedEffort    String   @default("AUTO")
+  reviewer           String   @default("AUTO")
+  requireApproval    Boolean  @default(true)
+  specVersion        Int      @default(1)
+  specHash           String
+  normalizedSpecJson String
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+  approvedAt         DateTime?
+  cancelledAt        DateTime?
+  constraints        TaskConstraint[]
+  acceptanceCriteria AcceptanceCriterion[]
+  permissions        TaskPermission[]
+  approvals          Approval[]
+  auditEvents         AuditEvent[]
+
+  @@unique([projectId, source, idempotencyKey])
+  @@unique([projectId, source, externalId])
+  @@index([projectId, status, createdAt])
+}
+
+model TaskConstraint {
+  id      String @id
+  taskId  String
+  task    Task   @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  ordinal Int
+  text    String
+
+  @@unique([taskId, ordinal])
+}
+
+model AcceptanceCriterion {
+  id          String @id
+  taskId      String
+  task        Task   @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  ordinal     Int
+  description String
+
+  @@unique([taskId, ordinal])
+}
+
+model TaskPermission {
+  id         String @id
+  taskId     String
+  task       Task   @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  ordinal    Int
+  permission String
+  valueJson  String
+
+  @@unique([taskId, permission])
+  @@unique([taskId, ordinal])
+}
+
+model Approval {
+  id              String   @id
+  taskId          String
+  task            Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  approvalType    String
+  requestedBy     String
+  resolvedBy      String?
+  status          String   @default("PENDING")
+  specHash        String
+  approvedSpecJson String
+  executor        String
+  model           String
+  effort          String
+  reviewer        String
+  permissionsJson String
+  requestedAt     DateTime @default(now())
+  resolvedAt      DateTime?
+  invalidatedAt   DateTime?
+
+  @@index([taskId, status, requestedAt])
+}
+
+model AuditEvent {
+  id          String   @id
+  projectId   String
+  project     Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  taskId      String?
+  task        Task?    @relation(fields: [taskId], references: [id], onDelete: SetNull)
+  actor       String
+  action      String
+  riskLevel   String
+  detailsJson String
+  createdAt   DateTime @default(now())
+
+  @@index([projectId, createdAt])
+  @@index([taskId, createdAt])
+}
+
+model ImportReport {
+  id                  String   @id
+  projectId           String?
+  project             Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  reportType          String
+  status              String
+  sourceCountsJson    String
+  candidateCountsJson String
+  skippedCountsJson   String
+  reasonsJson         String
+  createdAt           DateTime @default(now())
+
+  @@index([projectId, createdAt])
+}

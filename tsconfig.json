@@ -2,11 +2,15 @@
   "files": [],
   "references": [
     { "path": "packages/shared" },
+    { "path": "packages/local-safety" },
     { "path": "packages/database" },
     { "path": "packages/execution" },
     { "path": "packages/project-memory" },
     { "path": "packages/providers" },
     { "path": "packages/context-engine" },
+    { "path": "packages/relay-v2-domain" },
+    { "path": "packages/relay-v2-persistence" },
+    { "path": "packages/relay-v2-orchestrator" },
     { "path": "apps/worker" }
   ]
 }

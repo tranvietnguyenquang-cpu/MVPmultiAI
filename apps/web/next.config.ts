@@ -1,3 +1,10 @@
 import type { NextConfig } from "next";
-const config: NextConfig = { transpilePackages: ["@project-relay/database","@project-relay/shared","@project-relay/execution","@project-relay/project-memory","@project-relay/providers","@project-relay/context-engine"], experimental: { serverActions: { bodySizeLimit: "2mb" } } };
+import path from "node:path";
+
+const workspaceRoot = path.resolve(__dirname, "../..");
+const config: NextConfig = {
+  transpilePackages: ["@project-relay/database","@project-relay/shared","@project-relay/execution","@project-relay/local-safety","@project-relay/project-memory","@project-relay/providers","@project-relay/context-engine","@project-relay/relay-v2-domain","@project-relay/relay-v2-persistence","@project-relay/relay-v2-orchestrator"],
+  turbopack: { root: workspaceRoot },
+  experimental: { serverActions: { bodySizeLimit: "2mb" } }
+};
 export default config;

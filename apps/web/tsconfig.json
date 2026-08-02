@@ -11,7 +11,13 @@
       }
     ],
     "allowJs": true,
-    "isolatedModules": true
+    "isolatedModules": true,
+    "paths": {
+      "@project-relay/local-safety": ["../../packages/local-safety/src/index.ts"],
+      "@project-relay/relay-v2-domain": ["../../packages/relay-v2-domain/src/index.ts"],
+      "@project-relay/relay-v2-persistence": ["../../packages/relay-v2-persistence/src/index.ts"],
+      "@project-relay/relay-v2-orchestrator": ["../../packages/relay-v2-orchestrator/src/index.ts"]
+    }
   },
   "include": [
     "next-env.d.ts",

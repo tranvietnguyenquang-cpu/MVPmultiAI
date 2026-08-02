@@ -8,6 +8,9 @@ coverage/
 *.log
 .project-relay/
 .validation-workspace/
+.relay-data/
+packages/relay-v2-persistence/generated/
+packages/relay-v2-persistence/src/generated/
 
 
 .env.*

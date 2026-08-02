@@ -1,8 +1,11 @@
 import crossSpawn from "cross-spawn";
-import { realpath, stat } from "node:fs/promises";
+import { realpath } from "node:fs/promises";
 import path from "node:path";
 import type { ChildProcess } from "node:child_process";
 import type { CommandSpec } from "@project-relay/shared";
+import { redactSecrets, validateWorkspace } from "@project-relay/local-safety";
+
+export { redactSecrets, validateWorkspace } from "@project-relay/local-safety";
 
 export const SERVER_EXECUTABLE_ALLOWLIST = new Set(["git", "node", "npm", "npx"]);
 export const SERVER_COMMAND_CATALOG: Readonly<Record<string,CommandSpec>> = Object.freeze({
@@ -16,19 +19,6 @@ export const SAFE_ENVIRONMENT = Object.fromEntries(
   Object.entries(process.env).filter(([key]) => !/(KEY|TOKEN|SECRET|PASSWORD|COOKIE|CREDENTIAL|DATABASE_URL|^GIT_CONFIG_)/i.test(key))
 );
 
-const SECRET_PATTERNS = [
-  /\b(?:sk|pk)-[a-zA-Z0-9_-]{16,}\b/g,
-  /\b(?:ghp|github_pat)_[a-zA-Z0-9_]{16,}\b/g,
-  /\bBearer\s+[a-zA-Z0-9._~+/-]+=*\b/gi,
-  /(?:password|passwd|token|api[_-]?key|secret|cookie)\s*[=:]\s*[^\s,;]+/gi,
-  /(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?):\/\/[^\s]+/gi,
-  /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g
-];
-
-export function redactSecrets(input: string): string {
-  return SECRET_PATTERNS.reduce((text, pattern) => text.replace(pattern, "[REDACTED]"), input);
-}
-
 /** Buffers bounded process output so secrets split across arbitrary stream chunks are redacted together. */
 export class StreamSafeRedactor {
   private raw = "";
@@ -39,14 +29,6 @@ export class StreamSafeRedactor {
     if (remaining) this.raw += next.subarray(0, remaining).toString("utf8");
   }
   flush(): string { return redactSecrets(this.raw); }
-}
-
-export async function validateWorkspace(workspace: string): Promise<string> {
-  if (!path.isAbsolute(workspace)) throw new Error("Workspace path must be absolute.");
-  const resolved = await realpath(workspace);
-  if (!(await stat(resolved)).isDirectory()) throw new Error("Workspace path must be a directory.");
-  try { await stat(path.join(resolved, ".git")); } catch { throw new Error("Workspace must be the root of a Git repository."); }
-  return resolved;
 }
 
 function assertContained(root: string, candidate: string): void {
