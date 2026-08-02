@@ -25,3 +25,7 @@ export async function validateWorkspace(workspace: string): Promise<string> {
   }
   return resolved;
 }
+
+export function canonicalWorkspaceKey(workspace: string): string {
+  return path.resolve(workspace).replace(/\\/g, "/").replace(/\/$/, "").toLocaleLowerCase("en-US");
+}

@@ -24,6 +24,7 @@ model Project {
   tasks           Task[]
   auditEvents     AuditEvent[]
   importReports   ImportReport[]
+  executionSessions ExecutionSession[]
 }
 
 model Task {
@@ -59,6 +60,7 @@ model Task {
   permissions        TaskPermission[]
   approvals          Approval[]
   auditEvents         AuditEvent[]
+  executionSessions   ExecutionSession[]
 
   @@unique([projectId, source, idempotencyKey])
   @@unique([projectId, source, externalId])
@@ -125,6 +127,8 @@ model AuditEvent {
   project     Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
   taskId      String?
   task        Task?    @relation(fields: [taskId], references: [id], onDelete: SetNull)
+  executionSessionId String?
+  executionSession ExecutionSession? @relation(fields: [executionSessionId], references: [id], onDelete: SetNull)
   actor       String
   action      String
   riskLevel   String
@@ -133,6 +137,7 @@ model AuditEvent {
 
   @@index([projectId, createdAt])
   @@index([taskId, createdAt])
+  @@index([executionSessionId, createdAt])
 }
 
 model ImportReport {
@@ -148,4 +153,91 @@ model ImportReport {
   createdAt           DateTime @default(now())
 
   @@index([projectId, createdAt])
+}
+
+model ExecutionSession {
+  id                      String   @id
+  taskId                  String
+  task                    Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  projectId               String
+  project                 Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  executorId              String
+  executorConfigJson      String   @default("{}")
+  status                  String   @default("QUEUED")
+  attempt                 Int      @default(0)
+  workspacePath           String
+  workspaceKey            String
+  approvedSpecHash        String
+  approvedExecutor        String
+  approvedModel           String
+  approvedEffort          String
+  approvedReviewer        String
+  approvedPermissionsHash String
+  queuedAt                DateTime @default(now())
+  claimedAt               DateTime?
+  startedAt               DateTime?
+  finishedAt              DateTime?
+  cancelledAt             DateTime?
+  timeoutAt               DateTime?
+  heartbeatAt             DateTime?
+  durationMs              Int?
+  summary                 String   @default("")
+  failureCode             String?
+  failureMessage          String?
+  createdAt               DateTime @default(now())
+  updatedAt               DateTime @updatedAt
+  events                  ExecutionEvent[]
+  artifacts               ExecutionArtifact[]
+  leases                  WorkspaceLease[]
+  auditEvents             AuditEvent[]
+
+  @@index([status, queuedAt])
+  @@index([taskId, createdAt])
+  @@index([workspaceKey, status])
+}
+
+model ExecutionEvent {
+  id          String   @id
+  sessionId   String
+  session     ExecutionSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  sequence    Int
+  eventType   String
+  level       String
+  message     String
+  payloadJson String
+  createdAt   DateTime @default(now())
+
+  @@unique([sessionId, sequence])
+  @@index([sessionId, createdAt])
+}
+
+model ExecutionArtifact {
+  id           String   @id
+  sessionId    String
+  session      ExecutionSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  artifactType String
+  relativePath String
+  sha256       String
+  byteCount    Int
+  truncated    Boolean  @default(false)
+  createdAt    DateTime @default(now())
+
+  @@unique([sessionId, artifactType, relativePath])
+  @@index([sessionId, createdAt])
+}
+
+model WorkspaceLease {
+  id          String   @id
+  workspaceKey String
+  sessionId   String
+  session     ExecutionSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  leaseToken  String
+  acquiredAt DateTime @default(now())
+  heartbeatAt DateTime
+  expiresAt   DateTime
+  releasedAt DateTime?
+
+  @@index([workspaceKey, releasedAt])
+  @@index([sessionId, releasedAt])
+  @@index([expiresAt, releasedAt])
 }

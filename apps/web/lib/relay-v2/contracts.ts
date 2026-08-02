@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { normalizedTaskSpecSchema, taskSourceSchema } from "@project-relay/relay-v2-domain";
+import { fakeExecutorScenarioSchema, normalizedTaskSpecSchema, taskSourceSchema } from "@project-relay/relay-v2-domain";
 
 export const v2ProjectInputSchema = z.object({
   name: z.string().trim().min(1).max(100),
@@ -30,3 +30,8 @@ export const v2LegacyReportSchema = z.object({
   v2ProjectId: z.string().uuid(),
   legacyProjectIds: z.array(z.string().min(1).max(200)).min(1).max(100)
 }).strict();
+
+export const v2ExecutionRequestSchema = z.object({ fakeScenario: fakeExecutorScenarioSchema.partial().optional() }).strict();
+export const v2ExecutionCancelSchema = z.object({}).strict();
+export const v2ExecutionProjectQuerySchema = z.string().uuid();
+export const v2ExecutionCursorSchema = z.coerce.number().int().min(0).max(Number.MAX_SAFE_INTEGER);

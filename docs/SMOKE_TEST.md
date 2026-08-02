@@ -1,75 +1,80 @@
-# Relay v2 Milestone 1 smoke test
+# Relay v2 Milestone 2.1 smoke test
 
-Status: manual checklist for the implemented local project/task workflow. It intentionally contains no executor, provider API, MCP, deployment, or remote-bridge steps.
+Status: manual checklist for implemented projects, tasks, approvals, SQLite execution, FakeExecutor, SSE, artifacts, and cancellation. It contains no real provider, command, Git mutation, MCP, or deployment step.
 
 ## Setup
 
-1. Confirm `git status --short` and preserve unrelated changes.
-2. Set `RELAY_V2_DATA_DIR` to a new disposable directory under the repository's ignored `.relay-data` directory.
-3. Set `RELAY_V2_DATABASE_URL` to `file:<that-directory>/relay-v2.db` and run `npm run db:v2:migrate`.
-4. Set `RELAY_V2_ENABLED=true` and start only the existing web application.
-5. Open `http://localhost:3300/v2`.
+1. Confirm the branch and preserve unrelated changes.
+2. Point `RELAY_V2_DATA_DIR` and `RELAY_V2_DATABASE_URL` to an ignored disposable `.relay-data` directory.
+3. Run `npm run db:v2:migrate`.
+4. Set `RELAY_V2_ENABLED=true` and `RELAY_V2_EXECUTION_ENABLED=true`.
+5. Start the local web application and open `/v2`.
 
-## Projects
+## Approval authority
 
-- Open **Projects**, choose **Add project**, and register an absolute path to a local Git repository.
-- Verify a non-existent path and a directory without `.git` show a clear error.
-- Verify the project appears in `/v2/projects` and a `PROJECT_CREATED` audit event exists in SQLite.
+1. Register a disposable local Git-root project.
+2. Create a manual task and confirm `PENDING_APPROVAL` has no **Request Execution** action.
+3. Open Approval View and approve the exact snapshot.
+4. Return to task detail and confirm the approved hash, executor, model, effort, reviewer, and permissions.
+5. Edit an approved task and verify it returns to `PENDING_APPROVAL` before any execution can be requested.
 
-## Manual task
+## Successful FakeExecutor session
 
-- Open **Create Task**, choose the project, and fill title, objective, one acceptance criterion, executor/model/effort/reviewer, and optional context/constraints.
-- Choose **Create pending task**.
-- Verify the task detail status is `PENDING_APPROVAL`, selections and spec hash are visible, and audit history includes creation and submission.
-- Verify no worker, provider, or agent process starts and no queue job appears in the legacy application.
+1. On an approved task select the **Success** fake scenario.
+2. Choose **Request Execution**.
+3. Verify the session moves through queued/claimed/preparing/running to `SUCCEEDED`.
+4. Verify live output appears, sequence values are increasing, and refreshing does not lose events.
+5. Verify Timeline, result summary, released workspace lease, LOG artifact, hash, and byte count.
+6. Verify the registered project directory has not changed.
 
-## Handoff import
+## SSE reconnect hardening
 
-- Open **Import Handoff** and use **Copy template**.
-- Paste a valid YAML handoff, validate it, and inspect the normalized preview and hash.
-- Create the task and verify it is `PENDING_APPROVAL`.
-- Repeat with a JSON file and a YAML file.
-- Try **Import from clipboard**. If browser permission is denied, verify the UI explains that ordinary paste is the fallback.
-- Try malformed YAML, malformed JSON, a missing objective, an unsupported tag such as `!unsafe`, and a file larger than 262,144 bytes. Verify clear field-level errors and no task creation.
-- Put a fake credential-shaped value such as `api_key=supersecretvalue123` in context and verify persistence is rejected.
+1. Configure a FakeExecutor session to remain nonterminal beyond one bounded SSE connection lifetime.
+2. Keep the execution detail page open and verify live output resumes without refreshing the browser.
+3. Verify the reconnecting notice, if shown after repeated failures, is non-blocking and clears after reconnection.
+4. Verify event sequence numbers remain unique and increasing across the reconnect.
+5. Verify the final terminal event appears and no further reconnect attempts occur.
 
-## Duplicate handling
+## Cancellation
 
-- Submit the same imported handoff to the same project twice.
-- Verify the second submission returns the existing task rather than creating another row.
-- Reuse the same idempotency key with changed content through the API and verify a conflict.
+1. Approve a new task and select **Cancellation**.
+2. Request execution and choose **Cancel Execution** while running.
+3. Verify `CANCELLATION_REQUESTED`, `EXECUTION_CANCELLED`, and `WORKSPACE_RELEASED` appear.
+4. Verify terminal status is `CANCELLED` and no active lease remains.
+5. Repeat cancellation and verify it is harmless/idempotent.
+6. Confirm a cancel request missing the project or naming a different project is rejected without changing session status.
 
-## Approval and edit invalidation
+## Runtime-host diagnostics
 
-- From a pending task, open **Approval View** and verify the hash, executor, model, effort, reviewer, and permissions.
-- Choose **Approve without executing** and verify status becomes `APPROVED` while the page states that no execution was queued.
-- Edit the normalized task JSON, change the objective, and save.
-- Verify status returns to `PENDING_APPROVAL`, the previous approval is `INVALIDATED`, and a new pending approval has the new hash.
-- Approve again, then use **Cancel task** and verify `CANCELLED` plus its audit event.
+1. Run the automated runtime-host error-boundary test.
+2. Verify an injected unexpected failure is observable with its owned session ID, has secrets redacted, and contains no stack trace.
+3. Verify a later queued FakeExecutor session is still processed and the runtime stops cleanly.
 
-## Legacy preview
+## Workspace waiting
 
-- If the legacy PostgreSQL database is available, open **Legacy preview**, select rows, and create a report.
-- Verify source/candidate/skipped counts and reasons are shown.
-- Verify legacy approvals are counted as skipped and no v2 approval is created.
-- Verify no source row changes. If PostgreSQL is unavailable, record the preview as skipped; this must not block the v2 task workflow.
+1. Queue two approved tasks for the same project while the first cancellation scenario is running.
+2. Verify the second enters `WAITING_FOR_WORKSPACE`.
+3. Finish or cancel the first and verify its lease releases before the second can claim.
+
+## Failure and timeout
+
+- Select **Failure** and verify `FAILED` is based on a validated fake result.
+- Timeout is covered automatically with a short engine-owned test deadline. The UI diagnostic timeout uses the configured engine deadline and should end `TIMED_OUT` with a released lease.
 
 ## Automated verification
-
-Run:
 
 ```powershell
 npm run test:v2
 npm run typecheck
-npm run lint
 npm run build
 npm run test:browser:v2
 ```
 
-Record exact pass/fail/skip outcomes. The browser suite recreates a disposable SQLite database before every run and deliberately points legacy PostgreSQL/Redis URLs at unreachable test ports, proving the tested v2 flow does not depend on them. The ignored `.relay-data/playwright-v2` directory may remain after the server stops and is replaced on the next run.
+Record exact results. Browser tests use disposable SQLite and verify approval, successful streamed FakeExecutor output, unapproved-task rejection, and cancellation. They do not start a provider or execute a project command.
 
 ## Expected limitations
 
-- `APPROVED` is terminal for implemented Milestone 1 behavior except cancellation or edit-driven reapproval.
-- No code execution, review run, live process logs, Git checkpoint, or diff capture exists yet.
-- Legacy data import is disabled; only a read-only preview/report is implemented.
+- FakeExecutor only; no real AI CLI or API.
+- No Git status, checkpoint, diff, test command, source write, Docker, or deployment behavior.
+- Expired active sessions recover to `BLOCKED`; automatic retry is intentionally not implemented.
+- Artifact retention cleanup is planned.

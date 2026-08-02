@@ -21,7 +21,7 @@
     "test": "vitest run",
     "test:unit": "vitest run packages",
     "test:integration": "vitest run apps",
-    "test:v2": "npm run db:v2:generate && npm run build -w @project-relay/local-safety && vitest run --config vitest.v2.config.ts",
+    "test:v2": "npm run db:v2:generate && npm run build -w @project-relay/relay-v2-execution && vitest run --config vitest.v2.config.ts",
     "test:e2e": "vitest run apps --testNamePattern=e2e",
     "test:browser": "playwright test",
     "test:browser:v2": "node e2e-v2/prepare.mjs && npm run db:generate:all && npm run build -w @project-relay/web && node e2e-v2/run-playwright.mjs",

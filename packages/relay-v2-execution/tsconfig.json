@@ -1,0 +1,10 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": { "outDir": "dist", "rootDir": "src" },
+  "references": [
+    { "path": "../local-safety" },
+    { "path": "../relay-v2-domain" },
+    { "path": "../relay-v2-persistence" }
+  ],
+  "include": ["src/**/*.ts"]
+}

@@ -624,7 +624,24 @@ Exit: user approves or edits this plan.
 
 Exit: task creation/import/idempotency/state/approval tests pass; UI proves no create/import path can execute.
 
-### Milestone 2 — workspace runtime and Codex executor
+### Milestone 2 — provider-neutral execution engine with FakeExecutor
+
+- Add durable SQLite execution sessions, append-only execution events, bounded redacted artifacts, transactional claims, exclusive canonical-workspace leases, heartbeat, cancellation, timeout, stale recovery, SSE, and execution UI.
+- Implement only the provider-neutral executor contract and the in-process, non-writing FakeExecutor.
+- Keep legacy execution recoverable and prove the v2 engine cannot transitively reach providers, process launch, Redis, BullMQ, Git mutation, Docker, MCP, or external APIs.
+
+Exit: domain, persistence, engine, SSE, isolation, and browser tests pass; no real provider or project command is invoked.
+
+### Milestone 2.1 — runtime and streaming hardening
+
+- Allow native SSE reconnect with persisted cursor resume, deduplication, configurable test deadlines, and terminal cleanup.
+- Require project ownership for cancellation while preserving loopback and CSRF enforcement.
+- Extend dependency isolation scans through v2 app and component UI roots without treating executor display labels as integrations.
+- Contain runtime-host tick failures with bounded redacted diagnostics and continued polling.
+
+Exit: SSE reconnect, cancel authorization, UI isolation, and runtime-host failure regression tests pass; no real provider or command is invoked.
+
+### Milestone 2.2 — workspace runtime and Codex executor
 
 - Adapt path containment, Git inspection, process ownership, redaction, cancellation, timeouts, events/SSE, and the native runtime host.
 - Replace Redis/BullMQ for v2 with SQLite work claims and canonical workspace leases.

@@ -1,75 +1,60 @@
 # Relay v2 local setup
 
-Status: Milestone 1 implemented. Agent execution, provider APIs, MCP, and remote access are planned for later milestones.
+Status: Milestones 1 and 2 implemented. The provider-neutral engine and FakeExecutor are tested; real AI providers, command execution, MCP, and remote access are not implemented.
 
 ## Prerequisites
 
 - Windows 10 or later
-- Node.js and npm versions supported by the existing Relay repository
-- A local Git repository to register as a project
+- Node.js and npm supported by this repository
+- A local Git repository to register
 
-Milestone 1 does not require Codex CLI, Claude Code, Redis, BullMQ workers, or a running PostgreSQL server for the `/v2` workflow. The legacy application still retains its existing prerequisites and behavior.
+The v2 workflow does not require a running PostgreSQL server, Redis, BullMQ worker, real AI CLI, or API credential. Legacy application prerequisites remain unchanged.
 
-## Install and initialize
+## Initialize
 
 ```powershell
 npm install
 npm run db:v2:generate
-$env:RELAY_V2_DATABASE_URL = 'file:C:/path/to/disposable/relay-v2.db'
+$env:RELAY_V2_DATA_DIR = 'C:\path\to\Relay-data'
+$env:RELAY_V2_DATABASE_URL = 'file:C:/path/to/Relay-data/relay-v2.db'
 npm run db:v2:migrate
 ```
 
-For normal local use, Relay resolves its v2 data directory to `%LOCALAPPDATA%\Relay`. If `RELAY_V2_DATA_DIR` is explicitly set, that absolute directory is used instead. In development, when `NODE_ENV` is not `production`, the default is the ignored repository directory `.relay-data`. Automated tests must set an explicit disposable data directory and `PROJECT_RELAY_TEST_MODE=true`; the path resolver fails closed otherwise.
+Normal production-local data defaults to `%LOCALAPPDATA%\Relay`. Development defaults to ignored `.relay-data`. Tests require an explicit disposable data directory and fail closed otherwise.
 
-The database URL is derived as `file:<data-directory>/relay-v2.db`. `RELAY_V2_DATABASE_URL` may be supplied directly for Prisma migration commands. API keys are never stored in this database.
-
-Enable or disable the isolated UI with:
+Feature switches:
 
 ```powershell
-$env:RELAY_V2_ENABLED = 'true'   # enabled by default
-$env:RELAY_V2_ENABLED = 'false'  # /v2 and /api/v2 return not found
+$env:RELAY_V2_ENABLED = 'true'
+$env:RELAY_V2_EXECUTION_ENABLED = 'true'
 ```
 
-Start the existing web development server normally and open `http://localhost:3300/v2`. The v2 navigation is side-by-side with the legacy application.
+Set `RELAY_V2_EXECUTION_ENABLED=false` to disable execution routes and UI while retaining Milestone 1 task handling.
 
-## SQLite behavior verified in Milestone 1
+Start the existing web application and open `/v2`. The in-process v2 runtime starts its bounded SQLite polling loop when an execution screen or request initializes it. It is separate from the legacy worker and imports no legacy queue or provider package.
 
-Tested on Windows with Prisma 6.19.3 and SQLite:
+## SQLite behavior
 
-- checked-in migrations deploy to a new database;
-- foreign keys are enabled per connection;
-- transactions roll back atomically;
-- unique indexes reject sequential and concurrent duplicate writes;
-- `DateTime` values round-trip as JavaScript `Date` objects;
-- enum-like fields use normalized strings plus migration-level `CHECK` constraints;
-- structured values use canonical JSON in `TEXT` columns plus `json_valid` constraints;
-- WAL mode is enabled;
-- a 5000 ms busy timeout is configured for every Relay-created client;
-- audit-event update and delete operations are rejected by SQLite triggers.
+SQLite uses foreign keys, WAL, a 5000 ms busy timeout, short claim transactions, JSON checks, enum-like `CHECK` constraints, partial unique active-session/lease indexes, and append-only triggers for audit and execution events. SQLite still serializes writes; Relay v2 is a local single-user runtime, not a distributed worker cluster.
 
-Connector limitations:
+Artifacts are stored below `<data-directory>\artifacts\executions`. They are bounded and redacted. No retention cleanup UI exists yet.
 
-- Prisma's SQLite connector does not provide the PostgreSQL enum and JSON column semantics used by the legacy schema. Relay validates values with Zod and reinforces them with SQLite checks.
-- WAL improves reader/writer coexistence but SQLite still serializes writes. Milestone 1 assumes a single local Relay application with short transactions; it is not a distributed multi-writer design.
-- `foreign_keys` and `busy_timeout` are connection settings, so Relay initializes them whenever it creates a client.
-- The generated Prisma client is schema-specific and lives under the ignored `packages/relay-v2-persistence/generated` directory.
-
-## Verification commands
+## Verification
 
 ```powershell
 npm run test:v2
 npm run typecheck
-npm run lint
+npx eslint packages/local-safety/src packages/relay-v2-domain/src packages/relay-v2-persistence/src packages/relay-v2-orchestrator/src packages/relay-v2-execution/src apps/web/app/v2 apps/web/app/api/v2 apps/web/components/relay-v2 apps/web/lib/relay-v2 e2e-v2 --max-warnings=0
 npm run build
 npm run test:browser:v2
 ```
 
-`test:v2` and `test:browser:v2` use disposable SQLite data and do not start the legacy PostgreSQL/Redis integration stack. See `docs/SMOKE_TEST.md` for the manual checklist.
+See `docs/SMOKE_TEST.md`. Real CLI smoke tests are not part of Milestone 2.
 
-## Known Milestone 1 limitations
+## Limitations
 
-- Approval ends at `APPROVED`; it cannot queue or execute a process.
-- Legacy migration is preview/report-only. It never imports legacy approvals as v2 authorization.
-- The SQLite database has no backup UI yet. Before deleting a development database, verify the exact `.relay-data` path.
-- Portable mode is not implemented.
-
+- Only FakeExecutor is registered.
+- Fake scenario configuration is an explicit Milestone 2 diagnostic facility and is not a provider model selection.
+- Runtime hosting is in the local Next server process; durable queued sessions survive restart, while an expired active owner is recovered conservatively to `BLOCKED`.
+- Legacy migration remains report-only.
+- Portable mode and automated artifact retention are not implemented.

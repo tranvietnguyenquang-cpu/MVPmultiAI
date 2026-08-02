@@ -1,46 +1,45 @@
 # Relay v2 security boundaries
 
-Status: Milestone 1 local task/import/approval boundaries are implemented and tested. Runtime command policy, executor sandboxing, provider transmission approval, secure API credentials, and MCP authentication are planned for their later milestones.
+Status: Milestone 2 approval authority, SQLite execution claims, exclusive leases, redacted artifacts, SSE ownership, cancellation, timeout, and FakeExecutor isolation are implemented and tested. Milestone 2.1 hardens streaming, cancellation scoping, isolation coverage, and runtime diagnostics.
 
-## Local and feature isolation
+## Local boundary
 
-- `/v2` and `/api/v2` are isolated behind `RELAY_V2_ENABLED`.
-- Mutating v2 routes independently require loopback request headers, same-origin requests, and a matching CSRF cookie/header token.
-- The v2 browser client obtains only a CSRF token. It does not bootstrap the legacy PostgreSQL-backed local session.
-- v2 production source has no imports or call paths to BullMQ, Redis, workers, provider packages, child processes, session queues, or legacy execution APIs.
-- Approval responses explicitly return `executionQueued: false`.
-- There is no v2 run, work-item, agent-session, or execution-run model in the Milestone 1 database.
+- `/v2` and `/api/v2` remain feature-isolated.
+- Mutations require loopback headers, same-origin classification, and matching CSRF cookie/header.
+- Execution SSE additionally checks project/session ownership and reads only redacted persisted events.
+- Execution cancellation requires `projectId`, verifies project/session ownership before cancellation, and does not reveal cross-project session existence.
+- The v2 browser does not bootstrap the legacy PostgreSQL session.
 
-These controls preserve the legacy runtime without making it reachable from a v2 task action. Milestone 2 must introduce a separately reviewed execution boundary rather than connecting this milestone to the legacy queue.
+## Execution authority
 
-## Persistence
+Only `ExecutionEngine.requestExecution` creates a session. It rechecks the task and exact approved snapshot server-side. Changed spec hash, executor, model, effort, reviewer, or permissions invalidates approval and returns the task to `PENDING_APPROVAL`. Approval does not queue work by itself.
 
-The v2 SQLite database is separate from PostgreSQL. Milestone 1 writes only v2 projects, tasks, approvals, audit events, and preview reports to SQLite. The optional legacy report reads selected legacy rows and cannot write to PostgreSQL. It treats all legacy approvals as skipped evidence, never as v2 authorization. Ambiguous active state mappings are excluded with a reason.
+Only the engine changes `ExecutionSession` status. FakeExecutor returns typed events and a validated result; prose cannot mark success. Terminal sessions are immutable.
 
-Audit events are append-only at both the service contract and SQLite-trigger level. Details are bounded structured JSON and exclude task bodies, environment files, credentials, and raw internal exceptions.
+## Workspace ownership
 
-## Approval authority
+Project paths are revalidated as canonical Git roots before request and claim. A partial unique SQLite index permits one active workspace writer. Lease renewal requires the random token. Stale recovery requires expired ownership and stale heartbeat evidence, blocks the uncertain session, releases its lease, and audits the recovery. There is no normal force unlock.
 
-Every task begins in `PENDING_APPROVAL`. Approval records the exact specification hash, executor, model, effort, reviewer, permissions, approver, and resolution time. Approval changes status only to `APPROVED`. It has no execution side effect.
+## Output
 
-The orchestrator and explicit transition map are the only supported v2 status-change path. Milestone 1 exposes only draft submission, approval, cancellation/rejection, and approval invalidation after an edit. Invalid transitions are rejected and audited.
+The dependency-free local-safety package redacts output before database previews, SSE, or artifacts. Environment files and credentials are not read. Artifact paths are generated below app-owned storage, never inside project source. Fake changed-file entries are simulated metadata.
 
-## Input and secret handling
+## Dependency isolation
 
-- All API request bodies and normalized handoffs are strict Zod schemas.
-- YAML custom tags, aliases, duplicate keys, and merge keys are not accepted.
-- Handoffs are size limited before parsing.
-- Likely secrets are rejected before task persistence.
-- Environment-file contents are never read or logged by the handoff workflow.
-- Browser-facing unexpected errors use a fixed message; absolute paths and connection strings are redacted from deliberate errors as a backstop.
+Automated transitive graph tests cover the v2 packages, API routes, libraries, app routes, and Relay v2 UI components. They ensure these sources cannot reach legacy execution, provider adapters or SDKs, workers, Redis, BullMQ, cross-spawn, `node:child_process`, shell calls, MCP runtime code, external provider endpoints, or Git/Docker mutation paths. Display-only executor labels such as `CODEX` and `CLAUDE` are permitted and are not treated as integrations.
 
-Milestone 1 stores no API keys. Optional provider credentials and OS secure storage remain planned for Milestone 5.
+Runtime-host operational diagnostics contain only bounded, redacted error messages; stack traces are not retained. Callback failures cannot break polling. A known owned session is identified for diagnostics, while engine cleanup or conservative stale recovery owns its durable lifecycle.
 
-## Legacy report
+FakeExecutor:
 
-The legacy report is preview-only. It reports selected source counts, candidate counts, skipped counts, and reasons. It creates an `ImportReport` and audit event in SQLite. It does not copy source rows, change PostgreSQL, infer approval, or enable execution.
+- runs entirely in-process;
+- has `writeCapability=false`;
+- makes no external API call;
+- starts no process or shell;
+- performs no Git, Docker, or project filesystem mutation.
 
-## Planned boundaries
+Legacy execution remains present and recoverable but was not changed by Milestone 2.
 
-Milestone 2 must add command risk classification, dedicated dangerous approval, process cancellation/timeout, secret redaction for streaming output, workspace locking, and Git evidence before any executor is connected. MCP and provider APIs remain out of scope until their explicit milestones.
+## Planned
 
+Real local CLI execution, command risk classification, Git evidence, and dedicated dangerous-operation approvals begin only in a later explicitly approved milestone. Provider APIs, secure credentials, and MCP remain later work.

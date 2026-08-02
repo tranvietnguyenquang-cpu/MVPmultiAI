@@ -16,23 +16,30 @@ async function createProject(page: Page, name: string): Promise<void> {
   await expect(page.getByRole("heading", { name })).toBeVisible();
 }
 
-test("creates, previews, and approves a task without execution", async ({ page }) => {
+test("approves a task, requests FakeExecutor execution, and observes persisted success events", async ({ page }) => {
   await createProject(page, "Browser Test Project");
 
   await page.goto("/v2/tasks/new");
   await page.getByLabel("Project").selectOption({ label: "Browser Test Project" });
   await page.getByLabel("Title").fill("Verify pending workflow");
-  await page.getByLabel("Objective").fill("Prove Milestone 1 cannot start execution.");
+  await page.getByLabel("Objective").fill("Prove approved work runs only through FakeExecutor.");
   await page.getByLabel("Acceptance criteria, one per line").fill("Task is pending before approval\nApproval does not execute");
   await page.getByRole("button", { name: "Create pending task" }).click();
   await expect(page).toHaveURL(/\/v2\/tasks\/[0-9a-f-]+$/);
+  const taskUrl = page.url();
   await expect(page.getByText("PENDING_APPROVAL", { exact: true }).first()).toBeVisible();
 
   await page.getByRole("link", { name: "Open approval view" }).click();
-  await expect(page.getByText("Milestone 1 has no execution queue")).toBeVisible();
+  await expect(page.getByText("Approval itself stops at APPROVED", { exact: false })).toBeVisible();
   await page.getByRole("button", { name: "Approve without executing" }).click();
   await expect(page.getByText("APPROVED", { exact: true }).first()).toBeVisible();
-  await expect(page.getByText("No code, queue job, provider session, Git mutation, or process is created")).toBeVisible();
+  await page.goto(taskUrl);
+  await page.getByLabel("Fake executor scenario").selectOption("success");
+  await page.getByRole("button", { name: "Request Execution" }).click();
+  await expect(page).toHaveURL(/\/v2\/executions\/[0-9a-f-]+/);
+  await expect(page.getByText("SUCCEEDED", { exact: true }).first()).toBeVisible();
+  await expect(page.getByLabel("Execution live logs").getByText("Fake output 1", { exact: true })).toBeVisible();
+  await expect(page.getByText("LOG", { exact: true })).toBeVisible();
 });
 
 test("validates and previews pasted YAML before creating a pending task", async ({ page }) => {
@@ -57,4 +64,27 @@ execution:
   await page.getByRole("button", { name: "Create PENDING_APPROVAL task" }).click();
   await expect(page).toHaveURL(/\/v2\/tasks\/[0-9a-f-]+$/);
   await expect(page.getByText("PENDING_APPROVAL", { exact: true }).first()).toBeVisible();
+  await expect(page.getByRole("button", { name: "Request Execution" })).toHaveCount(0);
+});
+
+test("cancels a running FakeExecutor session and releases its workspace lease", async ({ page }) => {
+  await createProject(page, "Cancellation Browser Project");
+  await page.goto("/v2/tasks/new");
+  await page.getByLabel("Project").selectOption({ label: "Cancellation Browser Project" });
+  await page.getByLabel("Title").fill("Cancel fake execution");
+  await page.getByLabel("Objective").fill("Verify in-process cancellation reaches a durable terminal state.");
+  await page.getByLabel("Acceptance criteria, one per line").fill("Execution is cancelled\nWorkspace lease is released");
+  await page.getByRole("button", { name: "Create pending task" }).click();
+  await expect(page).toHaveURL(/\/v2\/tasks\/[0-9a-f-]+$/);
+  const taskUrl = page.url();
+  await page.getByRole("link", { name: "Open approval view" }).click();
+  await page.getByRole("button", { name: "Approve without executing" }).click();
+  await expect(page.getByText("APPROVED", { exact: true }).first()).toBeVisible();
+  await page.goto(taskUrl);
+  await page.getByLabel("Fake executor scenario").selectOption("cancellation");
+  await page.getByRole("button", { name: "Request Execution" }).click();
+  await expect(page.getByRole("button", { name: "Cancel Execution" })).toBeVisible();
+  await page.getByRole("button", { name: "Cancel Execution" }).click();
+  await expect(page.getByText("CANCELLED", { exact: true }).first()).toBeVisible();
+  await expect(page.getByText("RELEASED", { exact: true })).toBeVisible();
 });

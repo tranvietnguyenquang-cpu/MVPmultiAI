@@ -38,16 +38,42 @@ function workspaceImports(contents: string): string[] {
   return [...contents.matchAll(/(?:from\s+|import\s*\()\s*["'](@project-relay\/[^"']+)["']/g)].map(match => match[1] as string);
 }
 
-describe("Relay v2 Milestone 1 execution isolation", () => {
+const forbiddenRuntimePatterns = [
+  /from\s+["']bullmq["']/,
+  /from\s+["']ioredis["']/,
+  /@project-relay\/execution/,
+  /@project-relay\/providers/,
+  /apps\/worker|apps\\worker/,
+  /getSessionQueue|agent-sessions|conversation-message/,
+  /(?:from\s+|import\s*\()\s*["'](?:node:child_process|cross-spawn)["']/,
+  /(?:from\s+|import\s*\()\s*["'](?:openai|@anthropic-ai\/[^"']+|@google\/generative-ai|@google\/genai|@modelcontextprotocol\/[^"']+)["']/,
+  /\b(?:exec|execFile|execSync|execFileSync|spawn|spawnSync)\s*\(/,
+  /\bshell\s*:\s*true\b/,
+  /\bMcpServer\s*\(/,
+  /api\.(?:openai|anthropic)\.com|generativelanguage\.googleapis\.com|api\.deepseek\.com/i,
+  /\b(?:git|docker)\s+(?:commit|checkout|reset|push|pull|add|rm|build|run)\b/i,
+  /\/api\/sessions/,
+  /local-auth|csrf-client/
+];
+
+function forbiddenRuntimeReferences(contents: string): RegExp[] {
+  return forbiddenRuntimePatterns.filter(pattern => pattern.test(contents));
+}
+
+const v2SourceRoots = [
+  path.join(process.cwd(), "packages", "relay-v2-domain", "src"),
+  path.join(process.cwd(), "packages", "relay-v2-persistence", "src"),
+  path.join(process.cwd(), "packages", "relay-v2-orchestrator", "src"),
+  path.join(process.cwd(), "packages", "relay-v2-execution", "src"),
+  path.join(process.cwd(), "apps", "web", "app", "api", "v2"),
+  path.join(process.cwd(), "apps", "web", "app", "v2"),
+  path.join(process.cwd(), "apps", "web", "components", "relay-v2"),
+  path.join(process.cwd(), "apps", "web", "lib", "relay-v2")
+];
+
+describe("Relay v2 Milestone 2.1 execution isolation", () => {
   it("walks the transitive workspace dependency graph and cannot reach execution infrastructure", async () => {
-    const roots = [
-      path.join(process.cwd(), "packages", "relay-v2-domain", "src"),
-      path.join(process.cwd(), "packages", "relay-v2-persistence", "src"),
-      path.join(process.cwd(), "packages", "relay-v2-orchestrator", "src"),
-      path.join(process.cwd(), "apps", "web", "app", "api", "v2"),
-      path.join(process.cwd(), "apps", "web", "lib", "relay-v2")
-    ];
-    const files = (await Promise.all(roots.map(sourceFiles))).flat();
+    const files = (await Promise.all(v2SourceRoots.map(sourceFiles))).flat();
     files.push(path.join(process.cwd(), "apps", "web", "lib", "api-errors.ts"), path.join(process.cwd(), "apps", "web", "lib", "csrf.ts"));
     const packages = await workspacePackages();
     const pending = new Set<string>();
@@ -67,6 +93,7 @@ describe("Relay v2 Milestone 1 execution isolation", () => {
       }
     }
     expect(reachable).toContain("@project-relay/local-safety");
+    expect(reachable).toContain("@project-relay/relay-v2-execution");
     expect([...reachable]).not.toEqual(expect.arrayContaining(["@project-relay/execution", "@project-relay/providers", "@project-relay/worker"]));
     for (const name of reachable) {
       const dependencies = packages.get(name)?.manifest.dependencies ?? {};
@@ -77,29 +104,27 @@ describe("Relay v2 Milestone 1 execution isolation", () => {
 
   it("contains no direct production import or call path to queues, providers, workers, or child processes", async () => {
     const roots = [
-      path.join(process.cwd(), "packages", "relay-v2-domain", "src"),
-      path.join(process.cwd(), "packages", "relay-v2-persistence", "src"),
-      path.join(process.cwd(), "packages", "relay-v2-orchestrator", "src"),
+      ...v2SourceRoots,
       path.join(process.cwd(), "packages", "local-safety", "src"),
-      path.join(process.cwd(), "apps", "web", "app", "api", "v2"),
-      path.join(process.cwd(), "apps", "web", "lib", "relay-v2")
     ];
     const files = (await Promise.all(roots.map(sourceFiles))).flat();
-    const forbidden = [
-      /from\s+["']bullmq["']/,
-      /from\s+["']ioredis["']/,
-      /@project-relay\/execution/,
-      /@project-relay\/providers/,
-      /apps\/worker|apps\\worker/,
-      /getSessionQueue|agent-sessions|conversation-message/,
-      /from\s+["']node:child_process["']/,
-      /\/api\/sessions/,
-      /local-auth|csrf-client/
-    ];
     for (const file of files) {
       const contents = await readFile(file, "utf8");
-      for (const pattern of forbidden) expect(contents, `${path.relative(process.cwd(), file)} contains ${pattern}`).not.toMatch(pattern);
+      expect(forbiddenRuntimeReferences(contents), `${path.relative(process.cwd(), file)} contains a forbidden runtime reference`).toEqual([]);
+      if (file.includes(`${path.sep}relay-v2-execution${path.sep}`) || file.includes(`${path.sep}api${path.sep}v2${path.sep}executions${path.sep}`)) {
+        expect(contents, `${path.relative(process.cwd(), file)} names a real provider integration`).not.toMatch(/\b(?:codex|claude|gemini|deepseek|mcp)\b/i);
+      }
     }
+  });
+
+  it("detects forbidden runtime imports in UI roots without rejecting executor display labels", () => {
+    expect(v2SourceRoots).toEqual(expect.arrayContaining([
+      path.join(process.cwd(), "apps", "web", "app", "v2"),
+      path.join(process.cwd(), "apps", "web", "components", "relay-v2")
+    ]));
+    const forbiddenUiFixture = `import { providerRegistry } from "@project-relay/providers";\nvoid providerRegistry;`;
+    expect(forbiddenRuntimeReferences(forbiddenUiFixture)).not.toEqual([]);
+    expect(forbiddenRuntimeReferences(`const labels = ["CODEX", "CLAUDE", "GEMINI", "DEEPSEEK"];`)).toEqual([]);
   });
 
   it("keeps approve/cancel route responses explicit about not queueing execution", async () => {
