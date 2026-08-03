@@ -64,6 +64,7 @@ const v2SourceRoots = [
   path.join(process.cwd(), "packages", "relay-v2-persistence", "src"),
   path.join(process.cwd(), "packages", "relay-v2-orchestrator", "src"),
   path.join(process.cwd(), "packages", "relay-v2-execution", "src"),
+  path.join(process.cwd(), "packages", "relay-v2-reviewer", "src"),
   path.join(process.cwd(), "apps", "web", "app", "api", "v2"),
   path.join(process.cwd(), "apps", "web", "app", "v2"),
   path.join(process.cwd(), "apps", "web", "components", "relay-v2"),
@@ -157,5 +158,49 @@ describe("Relay v2 Milestone 2.2 execution isolation", () => {
     const client = await readFile(path.join(process.cwd(), "apps", "web", "lib", "relay-v2", "client.ts"), "utf8");
     expect(client).toContain("/api/csrf");
     expect(client).not.toContain("/api/auth/local-session");
+  });
+});
+
+describe("Relay v2 Milestone 2.3A reviewer isolation", () => {
+  it("keeps the reviewer package's own dependency edges limited to domain, persistence, local-safety, and zod", async () => {
+    const manifest = JSON.parse(await readFile(path.join(process.cwd(), "packages", "relay-v2-reviewer", "package.json"), "utf8")) as PackageManifest;
+    const dependencyNames = Object.keys(manifest.dependencies ?? {});
+    expect(dependencyNames.sort()).toEqual([
+      "@project-relay/local-safety", "@project-relay/relay-v2-domain", "@project-relay/relay-v2-persistence", "zod"
+    ].sort());
+    expect(dependencyNames).not.toEqual(expect.arrayContaining([
+      "@project-relay/relay-v2-execution", "@project-relay/execution", "@project-relay/providers",
+      "bullmq", "ioredis", "cross-spawn"
+    ]));
+  });
+
+  it("never lets FakeReviewer or the review engine import SafeProcessRunner or spawn a process", async () => {
+    const files = await sourceFiles(path.join(process.cwd(), "packages", "relay-v2-reviewer", "src"));
+    for (const file of files) {
+      const contents = await readFile(file, "utf8");
+      expect(contents, `${path.relative(process.cwd(), file)} references the process-running boundary`).not.toMatch(/process-runner|node:child_process|cross-spawn|SafeProcessRunner/);
+    }
+  });
+
+  it("never gives FakeReviewer filesystem, network, or Git access", async () => {
+    const fakeReviewer = await readFile(path.join(process.cwd(), "packages", "relay-v2-reviewer", "src", "fake-reviewer.ts"), "utf8");
+    expect(fakeReviewer).not.toMatch(/node:fs|node:net|node:http|node:https|node:child_process/);
+  });
+
+  it("only registers fake-reviewer in this milestone's review services wiring", async () => {
+    const server = await readFile(path.join(process.cwd(), "apps", "web", "lib", "relay-v2", "server.ts"), "utf8");
+    expect(server).toContain("new FakeReviewer()");
+    expect(server).not.toMatch(/claude-reviewer|ClaudeReviewer|codex-reviewer|CodexReviewer/i);
+  });
+
+  it("never exposes commit, push, merge, retry, or deployment controls from the review UI", async () => {
+    const files = [
+      ...(await sourceFiles(path.join(process.cwd(), "apps", "web", "components", "relay-v2"))).filter(file => /review/i.test(file)),
+      path.join(process.cwd(), "apps", "web", "app", "v2", "reviews", "[id]", "page.tsx")
+    ];
+    for (const file of files) {
+      const contents = await readFile(file, "utf8");
+      expect(contents, `${path.relative(process.cwd(), file)} exposes a commit/push/merge/deploy control`).not.toMatch(/>Commit|>Push|>Merge|>Deploy|git\s+(commit|push|merge)/i);
+    }
   });
 });

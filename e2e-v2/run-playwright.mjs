@@ -11,6 +11,10 @@ const environment = {
   PROJECT_RELAY_BIND_HOST: "127.0.0.1",
   PROJECT_RELAY_TEST_MODE: "true",
   RELAY_V2_CODEX_TEST_DOUBLE: "true",
+  // Narrow, separately-gated diagnostic path: lets FakeReviewer review a codex-cli
+  // test-double session in this disposable browser-test environment only. Combined
+  // with PROJECT_RELAY_TEST_MODE and the playwright-v2 data dir below; never on elsewhere.
+  RELAY_V2_FAKE_REVIEWER_DIAGNOSTIC: "true",
   RELAY_V2_ENABLED: "true",
   RELAY_V2_DATA_DIR: dataDir,
   RELAY_V2_E2E_DATA_DIR: dataDir,

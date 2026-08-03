@@ -2,6 +2,7 @@ import type { NextRequest } from "next/server";
 import { getRelayV2Database } from "@project-relay/relay-v2-persistence";
 import { RelayV2Orchestrator } from "@project-relay/relay-v2-orchestrator";
 import { CodexCliExecutor, ExecutionArtifactStore, ExecutionEngine, ExecutionRuntimeHost, FakeExecutor } from "@project-relay/relay-v2-execution";
+import { FakeReviewer, ReviewEngine, ReviewRuntimeHost } from "@project-relay/relay-v2-reviewer";
 import { ApiError } from "../api-errors.js";
 import { classifyRequest } from "../csrf.js";
 import { isLoopbackRequestHeaders } from "@project-relay/shared";
@@ -65,4 +66,26 @@ export function getRelayV2ExecutionServices(): Promise<RelayV2ExecutionServices>
     return { engine, runtime: new ExecutionRuntimeHost(engine) };
   })();
   return executionGlobal.relayV2ExecutionServices;
+}
+
+type RelayV2ReviewServices = { engine: ReviewEngine; runtime: ReviewRuntimeHost };
+const reviewGlobal = globalThis as unknown as { relayV2ReviewServices?: Promise<RelayV2ReviewServices> };
+
+export function getRelayV2ReviewServices(): Promise<RelayV2ReviewServices> {
+  assertRelayV2ExecutionEnabled();
+  reviewGlobal.relayV2ReviewServices ??= (async () => {
+    const { client } = await getRelayV2Database();
+    // FakeExecutor sessions are only reviewable in this explicit automated-test diagnostic mode,
+    // never in a normal local or production runtime.
+    const allowFakeExecutorDiagnosticReviews = process.env.PROJECT_RELAY_TEST_MODE === "true";
+    // A separately-gated diagnostic path (mirrors createBrowserCodexTestDouble's gate)
+    // that lets FakeReviewer review a codex-cli test-double session in the disposable
+    // Playwright browser-test environment only. Never AUTHORITATIVE, never on elsewhere.
+    const allowCodexTestDoubleDiagnosticReviews = process.env.PROJECT_RELAY_TEST_MODE === "true"
+      && process.env.RELAY_V2_FAKE_REVIEWER_DIAGNOSTIC === "true"
+      && Boolean(process.env.RELAY_V2_DATA_DIR?.includes("playwright-v2"));
+    const engine = new ReviewEngine(client, [new FakeReviewer()], { allowFakeExecutorDiagnosticReviews, allowCodexTestDoubleDiagnosticReviews });
+    return { engine, runtime: new ReviewRuntimeHost(engine) };
+  })();
+  return reviewGlobal.relayV2ReviewServices;
 }

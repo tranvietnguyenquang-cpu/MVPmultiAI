@@ -21,6 +21,7 @@
     "@project-relay/relay-v2-execution": "0.1.0",
     "@project-relay/relay-v2-orchestrator": "0.1.0",
     "@project-relay/relay-v2-persistence": "0.1.0",
+    "@project-relay/relay-v2-reviewer": "0.1.0",
     "@project-relay/shared": "0.1.0",
     "bullmq": "5.80.10",
     "ioredis": "5.7.0",

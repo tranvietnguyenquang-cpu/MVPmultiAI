@@ -88,6 +88,12 @@ Abort observation begins before asynchronous validation and is rechecked before 
 
 The server-owned verification catalog currently supports `npm test`, `npm run typecheck`, and `npm run build` through Node plus npm's CLI entry point—never an arbitrary task-supplied shell string. Exit zero without passing the approved verification list is `FAILED`, not accepted success.
 
+## Review gate (Milestone 2.3A)
+
+A `SUCCEEDED` session with its task at `AWAITING_USER_ACCEPTANCE` may request an evidence-bound review through `ReviewEngine` (see `docs/REVIEW_ENGINE.md`). A review verdict never changes `ExecutionSession` or `Task` status — it only sets a separately computed, authority-preserving `ReviewGateProjection` (never a plain status string; `commitAuthorityEligible` is always `false` in this milestone). `AWAITING_USER_ACCEPTANCE` still means what it always meant: the execution result requires later user acceptance.
+
+Requesting a review never runs a reviewer inline: the API only creates a `PENDING` `ReviewRequest` row, and a separate `ReviewRuntimeHost` durably claims and runs it (mirroring this engine's own `ExecutionRuntimeHost` claim/lease/heartbeat/recovery design). Reviewer authority is matched against the task's approved reviewer selection independently of executor selection — see "Reviewer authority" in `docs/REVIEW_ENGINE.md`.
+
 ## Planned
 
-Claude review begins only in the next separately approved milestone. Automatic commit, merge, push, deployment, MCP, and API providers remain planned.
+Real Claude CLI review (Milestone 2.3B) and an auto-commit gate that can act on an approved review (Milestone 2.4) remain later, separately approved milestones. Automatic commit, merge, push, deployment, MCP, and API providers remain planned.

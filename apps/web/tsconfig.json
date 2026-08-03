@@ -17,7 +17,8 @@
       "@project-relay/relay-v2-domain": ["../../packages/relay-v2-domain/src/index.ts"],
       "@project-relay/relay-v2-persistence": ["../../packages/relay-v2-persistence/src/index.ts"],
       "@project-relay/relay-v2-orchestrator": ["../../packages/relay-v2-orchestrator/src/index.ts"],
-      "@project-relay/relay-v2-execution": ["../../packages/relay-v2-execution/src/index.ts"]
+      "@project-relay/relay-v2-execution": ["../../packages/relay-v2-execution/src/index.ts"],
+      "@project-relay/relay-v2-reviewer": ["../../packages/relay-v2-reviewer/src/index.ts"]
     }
   },
   "include": [

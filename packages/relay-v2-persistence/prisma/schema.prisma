@@ -25,6 +25,7 @@ model Project {
   auditEvents     AuditEvent[]
   importReports   ImportReport[]
   executionSessions ExecutionSession[]
+  reviewRequests    ReviewRequest[]
 }
 
 model Task {
@@ -61,6 +62,7 @@ model Task {
   approvals          Approval[]
   auditEvents         AuditEvent[]
   executionSessions   ExecutionSession[]
+  reviewRequests      ReviewRequest[]
 
   @@unique([projectId, source, idempotencyKey])
   @@unique([projectId, source, externalId])
@@ -203,6 +205,7 @@ model ExecutionSession {
   artifacts               ExecutionArtifact[]
   leases                  WorkspaceLease[]
   auditEvents             AuditEvent[]
+  reviewRequests          ReviewRequest[]
 
   @@index([status, queuedAt])
   @@index([taskId, createdAt])
@@ -269,4 +272,93 @@ model WorkspaceLease {
   @@index([workspaceKey, releasedAt])
   @@index([sessionId, releasedAt])
   @@index([expiresAt, releasedAt])
+}
+
+model ReviewRequest {
+  id                       String   @id
+  executionSessionId       String
+  executionSession          ExecutionSession @relation(fields: [executionSessionId], references: [id], onDelete: Cascade)
+  projectId                String
+  project                  Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  taskId                   String
+  task                     Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  reviewerId               String
+  reviewAuthority          String
+  diagnosticRequested      Boolean  @default(false)
+  approvalId               String
+  approvalStatus           String
+  approvalReviewerSelection String
+  taskSelectedReviewer     String
+  executionExecutorId      String
+  status                   String   @default("PENDING")
+  attempt                  Int      @default(0)
+  taskSpecHash             String
+  approvalSnapshotHash     String
+  executionCapsuleHash     String
+  baselineGitEvidenceHash  String
+  finalGitEvidenceHash     String
+  verificationResultsHash  String
+  executionArtifactSetHash String
+  executionResultStatus    String
+  finalBranch              String
+  finalHead                String
+  reviewPolicyVersion      String
+  reviewInputJson          String
+  reviewInputHash          String
+  requestHash              String
+  reviewerConfigJson       String   @default("{}")
+  reviewerConfigHash       String
+  requestedBy              String
+  requestedAt              DateTime @default(now())
+  ownerId                  String?
+  leaseToken               String?
+  claimedAt                DateTime?
+  heartbeatAt              DateTime?
+  leaseExpiresAt           DateTime?
+  cancellationRequestedAt  DateTime?
+  claimAttempts            Int      @default(0)
+  startedAt                DateTime?
+  finishedAt               DateTime?
+  invalidatedAt            DateTime?
+  failureCode              String?
+  failureMessage           String?
+  createdAt                DateTime @default(now())
+  updatedAt                DateTime @updatedAt
+  verdicts                 ReviewVerdict[]
+  events                   ReviewEvent[]
+
+  @@index([executionSessionId, createdAt])
+  @@index([projectId, createdAt])
+  @@index([taskId, createdAt])
+  @@index([status, requestedAt])
+  @@index([status, leaseExpiresAt])
+}
+
+model ReviewVerdict {
+  id                  String   @id
+  reviewRequestId     String   @unique
+  reviewRequest       ReviewRequest @relation(fields: [reviewRequestId], references: [id], onDelete: Cascade)
+  verdict             String
+  summary             String
+  findingsJson        String
+  requiredActionsJson String
+  confidence          Float
+  reviewerVersion     String
+  reviewedRequestHash String
+  createdAt           DateTime @default(now())
+}
+
+model ReviewEvent {
+  id              String   @id
+  reviewRequestId String
+  reviewRequest   ReviewRequest @relation(fields: [reviewRequestId], references: [id], onDelete: Cascade)
+  sequence        Int
+  eventType       String
+  level           String
+  message         String
+  payloadJson     String
+  createdAt       DateTime @default(now())
+
+  @@unique([reviewRequestId, sequence])
+  @@index([reviewRequestId, createdAt])
 }

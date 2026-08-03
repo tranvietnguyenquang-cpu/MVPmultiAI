@@ -652,14 +652,47 @@ Exit: SSE reconnect, cancel authorization, UI isolation, and runtime-host failur
 
 Exit: unit/integration tests pass; real Codex smoke test passes or is explicitly skipped because CLI/auth is absent; no unsupported configuration is silently accepted.
 
-### Milestone 3 — Claude reviewer and fallback executor
+### Milestone 2.3A — reviewer workflow foundation
 
-- Adapt Claude discovery/help/capabilities/streaming/cancellation/timeout behavior.
-- Implement review runs, minimum-context review capsule, findings/verdict UI, staleness checks, and user resolution.
-- Allow Claude implementation only as an explicit, capability-validated, approved fallback.
+- **Implemented:** provider-neutral `RelayReviewer` contract, `ReviewRequest`/`ReviewVerdict`/`ReviewEvent` domain model (append-only verdict/event tables, terminal-immutable request row, all enforced by SQLite triggers, not only application code), and the `ReviewEngine` application service.
+- **Implemented:** cryptographic evidence binding — a review request hashes the exact task spec/approval snapshot/execution capsule/baseline+final Git evidence/verification results/artifact set/final branch+HEAD at request time, and `ReviewEngine` rechecks every one of those hashes immediately before accepting a verdict, invalidating to `STALE` instead of silently updating the request if anything changed.
+- **Implemented:** Zod-validated structured verdict (`APPROVE`/`REJECT`/`NEEDS_CHANGES`) with cross-field invariants — no blocking BLOCKER/HIGH finding on `APPROVE`, at least one blocking finding on `REJECT`, at least one required action on `NEEDS_CHANGES`; a structurally invalid or hash-mismatched reviewer response becomes `ERROR`, never `APPROVE`.
+- **Implemented:** `FakeReviewer` only — in-process, read-only, six deterministic scenarios (approve/reject/needs_changes/invalid/failure/cancellation), scenario persisted for restart, explicitly diagnostic-only in the UI, and reviewing a `FakeExecutor` session requires both an engine-level flag and an explicit per-request diagnostic flag.
+- **Implemented:** a review verdict changes only a separately computed `ReviewGateProjection` (see below), never `ExecutionSession`/`Task` status; no automatic reopen, rerun, file modification, acceptance, or commit follows from a review.
+- **Implemented:** `packages/relay-v2-reviewer` depends only on `relay-v2-domain`, `relay-v2-persistence`, `local-safety`, and `zod` — dependency-isolation tests prove it cannot reach `SafeProcessRunner`, `node:child_process`, providers, or any real CLI/API/MCP integration.
+- **Implemented (corrective pass after independent review, 2026-08-02):** reviewer-authority matching (`resolveReviewerAuthority`) binding task approval id/status/reviewer-selection, the task's current reviewer selection, execution executor id, and reviewer id — `fake-reviewer` can never produce an `AUTHORITATIVE` verdict, and is rejected for a `codex-cli` execution except through two narrow, separately-gated `DIAGNOSTIC` paths (a `FakeExecutor` diagnostic session, or a Codex test-double session behind a dedicated `RELAY_V2_FAKE_REVIEWER_DIAGNOSTIC` flag plus the existing test-mode/disposable-data-dir gate).
+- **Implemented:** final verdict acceptance re-reads every source-of-truth row fresh and reruns eligibility, authority resolution, and full binding reconstruction immediately before persisting a verdict — not just an evidence-hash diff.
+- **Implemented:** durable cancellation state (`CANCELLATION_REQUESTED`) with compare-and-swap finalization — cancellation and verdict persistence race safely, exactly one terminal outcome is ever created, and repeated cancellation is idempotent.
+- **Implemented:** durable review claiming via a `ReviewRuntimeHost` (atomic `PENDING -> CLAIMED` CAS with owner id/lease token/heartbeat/expiry, restart-safe `PENDING` rows, conservative `STALE`/`CANCELLED` lease-expiry recovery, never inventing a verdict); API request handlers no longer run a reviewer inline.
+- **Implemented:** `GET /api/v2/executions/{id}/reviews` checks execution-session project ownership before touching any `ReviewRequest` row, so a wrong-project or nonexistent execution is indistinguishable from one with zero reviews.
+- **Implemented (second corrective pass after independent review, 2026-08-02):** a single canonical `ReviewInputCapsule` — including **live-read** task title/objective/context, execution status/summary, and two independent spec-integrity recomputations (`canonicalTaskSpecHash`, `taskNormalizedSpecHash`) alongside every evidence hash — is persisted verbatim as `reviewInputJson`/`reviewInputHash`; `requestHash` wraps `reviewInputHash` with the request's non-reviewer-visible identity (`requestedBy`, `attempt`); `Reviewer.review()` receives exactly the object parsed back from the persisted `reviewInputJson`, never task/execution fields reassembled from live rows at run time.
+- **Implemented:** final revalidation now runs inside the same database transaction as the terminal status CAS and the `ReviewVerdict` insert, and additionally detects task title/objective/context/normalized-spec drift (previously only evidence/approval/authority drift was caught).
+- **Implemented:** `ReviewVerdict.reviewRequestId` carries a database-level `UNIQUE` constraint (not only an application CAS) — a second verdict insert for the same review request fails at the database regardless of how it is attempted.
+- **Implemented:** lease-bound verdict finalization — every terminal write (verdict/`STALE`/`ERROR`) re-proves the exact claimed ownership generation (`ownerId`, `leaseToken`, `claimAttempts`, live `leaseExpiresAt`) inside the same transaction as the write; an expired, superseded, or mismatched owner can never produce a verdict, and only `recoverStaleReviews` or a still-live owner's own `resolveFinalizationRace` may resolve an ownerless row.
+- **Implemented:** `ReviewGateProjection` (`state`/`authority`/`reviewerId`/`reviewRequestId`/`verdictId`/`requestHash`/`commitAuthorityEligible`) replaces the plain `reviewGateStatus` string everywhere — API responses and UI always show authority alongside state, a `DIAGNOSTIC` `APPROVE` renders as "Diagnostic approval" and never as plain approval, and `canSatisfyAuthoritativeReviewGate` unconditionally returns `false` in this milestone (no auto-commit policy exists yet).
+- **Implemented (third corrective pass after independent review, 2026-08-02):** every reviewer-visible **and reviewer-control** value is bound, not only the evidence capsule — FakeReviewer's `reviewerConfigJson` (outcome/delay/summary/findings/required-actions) directly determines the verdict, so it is validated against a per-reviewer schema (`reviewerConfigSchemaFor`), canonicalized, and hashed into `reviewerConfigHash`; `requestHash` now composes `{ reviewInputHash, reviewerConfigHash, reviewerId, reviewAuthority, requestedBy, attempt, reviewPolicyVersion }`.
+- **Implemented:** `ReviewEngine.verifyImmutableInputBinding` independently re-parses, re-validates, and re-hashes `reviewInputJson`/`reviewerConfigJson` and reconstructs `requestHash` from scratch — never trusting a persisted hash merely because a database trigger protects it — both immediately before the reviewer is ever invoked (a mismatch here means the reviewer is **never called**) and again inside the lease-qualified finalization transaction, before any live evidence reconstruction. Either failure moves the request to `STALE` with a distinct `failureCode: "REVIEW_IMMUTABLE_INPUT_MISMATCH"` (versus `"EVIDENCE_CHANGED"` for live-evidence drift), so the audit trail always records which layer actually failed.
+- **Implemented:** a database-level `BEFORE UPDATE` trigger, `ReviewRequest_immutable_payload`, rejects any change to the request's full authority/evidence/binding payload (including the new `reviewerConfigHash`) in **every** status — `PENDING`/`CLAIMED`/`RUNNING`/`CANCELLATION_REQUESTED` included, not only once terminal — while still permitting the controlled lifecycle/lease columns to change; proven both by direct-update rejection tests in every non-terminal status and by hand-seeded corrupt/legacy-row fixtures that reach `ReviewEngine` only via `INSERT` (which the trigger does not govern) and are still caught and refused a verdict at runtime.
+- **Fixed:** the concurrent unique-verdict test previously raced two inserts against a request that already had a verdict (proving nothing about a genuine first-slot race); it now races two concurrent inserts against a zero-verdict request and asserts exactly one wins, repeated to reduce flakiness.
+- **Verified:** the Milestone 2.3A migration (still uncommitted, modified in place — no new migration created) applies cleanly both on a fresh database and incrementally on top of an existing Alpha 0.3 database (migrations 1-3 already applied, migration 4 deployed separately afterward).
+- **Not implemented:** a real Claude CLI reviewer adapter (Milestone 2.3B) and an auto-commit gate that can act on an approved review (Milestone 2.4).
+
+Exit: domain/persistence/engine/FakeReviewer/API/isolation/browser tests pass; no real Claude CLI, Anthropic API, or other provider is invoked; no automatic commit/merge/push/retry occurs.
+
+### Milestone 2.3B — Claude CLI reviewer adapter (planned)
+
+- Adapt Claude discovery/help/capabilities/streaming/cancellation/timeout behavior, following the same capability-validated pattern as `CodexCliExecutor`.
+- Register a real `RelayReviewer` implementation alongside `FakeReviewer`; allow it only as an explicit, capability-validated, approved reviewer.
 - Do not make Relay depend on Claude availability.
 
-Exit: review lifecycle and context-minimization tests pass; real CLI smoke is pass or explicit skip.
+Exit: review lifecycle and context-minimization tests pass against the real adapter; real CLI smoke is pass or explicit skip.
+
+### Milestone 2.4 — auto-commit gate (planned)
+
+- Define the policy under which an `APPROVED` review verdict may authorize a commit (and only a commit — not merge/push/deploy) of the reviewed execution's changes.
+- Extend, not replace, the evidence-binding and staleness-recheck model from Milestone 2.3A: a commit must be bound to the exact reviewed evidence, not merely to a review ID.
+
+Exit: commit-authorization tests prove no commit occurs without a current, non-stale `APPROVED` verdict bound to unchanged evidence.
 
 ### Milestone 4 — memory engine
 

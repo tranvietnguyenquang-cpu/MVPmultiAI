@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { fakeExecutorScenarioSchema, normalizedTaskSpecSchema, taskSourceSchema } from "@project-relay/relay-v2-domain";
+import { fakeExecutorScenarioSchema, fakeReviewerScenarioSchema, normalizedTaskSpecSchema, taskSourceSchema } from "@project-relay/relay-v2-domain";
 
 export const v2ProjectInputSchema = z.object({
   name: z.string().trim().min(1).max(100),
@@ -38,3 +38,12 @@ export const v2ExecutionRequestSchema = z.object({
 export const v2ExecutionCancelSchema = z.object({}).strict();
 export const v2ExecutionProjectQuerySchema = z.string().uuid();
 export const v2ExecutionCursorSchema = z.coerce.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
+
+export const v2ReviewRequestSchema = z.object({
+  reviewerId: z.literal("fake-reviewer").default("fake-reviewer"),
+  diagnostic: z.boolean().default(false),
+  reviewerConfig: fakeReviewerScenarioSchema.partial().optional()
+}).strict();
+export const v2ReviewCancelSchema = z.object({}).strict();
+export const v2ReviewProjectQuerySchema = z.string().uuid();
+export const v2ReviewCursorSchema = z.coerce.number().int().min(0).max(Number.MAX_SAFE_INTEGER);

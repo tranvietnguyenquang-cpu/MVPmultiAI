@@ -12,6 +12,7 @@
     { "path": "packages/relay-v2-persistence" },
     { "path": "packages/relay-v2-orchestrator" },
     { "path": "packages/relay-v2-execution" },
+    { "path": "packages/relay-v2-reviewer" },
     { "path": "apps/worker" }
   ]
 }

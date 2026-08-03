@@ -1,0 +1,73 @@
+import type { ReviewAuthority, ReviewerSelection } from "@project-relay/relay-v2-domain";
+
+/**
+ * Runtime reviewer id that an approved `ReviewerSelection` resolves to. Empty
+ * in Milestone 2.3A: no Claude (or any other) reviewer is implemented yet, so
+ * no `codex-cli` execution can receive an AUTHORITATIVE review through this
+ * map. It exists as an injection point so the matching logic below is
+ * provably correct without depending on a reviewer that does not exist yet.
+ */
+export type ReviewerIdBySelection = Partial<Record<ReviewerSelection, string>>;
+export const PRODUCTION_REVIEWER_ID_BY_SELECTION: ReviewerIdBySelection = {};
+
+export type ReviewerAuthorityInput = {
+  requestedReviewerId: string;
+  approvalStatus: string;
+  approvalReviewerSelection: ReviewerSelection;
+  taskSelectedReviewer: ReviewerSelection;
+  executionExecutorId: string;
+  diagnosticRequested: boolean;
+  /** FakeExecutor sessions are reviewable only under this narrow diagnostic gate. */
+  allowFakeExecutorDiagnosticReviews: boolean;
+  /** A codex-cli (including Codex test-double) session is reviewable by FakeReviewer only under this narrow, separately-gated diagnostic path. */
+  allowCodexTestDoubleDiagnosticReviews: boolean;
+};
+
+export type ReviewerAuthorityResult =
+  | { authorized: true; mode: ReviewAuthority }
+  | { authorized: false; reason: string };
+
+/**
+ * Pure authority-matching decision. Never trusts the caller's claim about
+ * what was approved — every field here must be re-derived by the caller from
+ * current source-of-truth rows (Approval/Task/ExecutionSession), both at
+ * request time and again during final verdict revalidation.
+ */
+export function resolveReviewerAuthority(
+  input: ReviewerAuthorityInput,
+  reviewerIdBySelection: ReviewerIdBySelection = PRODUCTION_REVIEWER_ID_BY_SELECTION
+): ReviewerAuthorityResult {
+  if (input.approvalStatus !== "APPROVED") {
+    return { authorized: false, reason: "The task approval used for this execution is not APPROVED." };
+  }
+  if (input.approvalReviewerSelection === "NONE") {
+    return { authorized: false, reason: "Reviewer selection NONE cannot authorize a review." };
+  }
+  if (input.taskSelectedReviewer !== input.approvalReviewerSelection) {
+    return { authorized: false, reason: "The task's reviewer selection changed since approval; a new task approval is required." };
+  }
+
+  if (input.executionExecutorId === "fake") {
+    if (!(input.diagnosticRequested && input.allowFakeExecutorDiagnosticReviews)) {
+      return { authorized: false, reason: "A FakeExecutor diagnostic session requires both an explicit diagnostic request and the runtime diagnostic gate." };
+    }
+    if (input.requestedReviewerId !== "fake-reviewer") {
+      return { authorized: false, reason: "Only fake-reviewer may review a FakeExecutor diagnostic session." };
+    }
+    return { authorized: true, mode: "DIAGNOSTIC" };
+  }
+
+  if (input.requestedReviewerId === "fake-reviewer") {
+    if (input.diagnosticRequested && input.allowCodexTestDoubleDiagnosticReviews) return { authorized: true, mode: "DIAGNOSTIC" };
+    return { authorized: false, reason: "FakeReviewer cannot review a codex-cli execution outside the disposable test-double diagnostic gate." };
+  }
+
+  const expectedReviewerId = reviewerIdBySelection[input.approvalReviewerSelection];
+  if (!expectedReviewerId) {
+    return { authorized: false, reason: `No reviewer is available in this runtime for the approved reviewer selection '${input.approvalReviewerSelection}'.` };
+  }
+  if (input.requestedReviewerId !== expectedReviewerId) {
+    return { authorized: false, reason: "Requested reviewer does not match the approved reviewer snapshot." };
+  }
+  return { authorized: true, mode: "AUTHORITATIVE" };
+}
