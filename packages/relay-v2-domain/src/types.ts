@@ -43,7 +43,7 @@ export const taskStatusSchema = z.enum([
 ]);
 export type TaskStatus = z.infer<typeof taskStatusSchema>;
 
-export const executorSelectionSchema = z.enum(["AUTO", "CODEX", "CLAUDE"]);
+export const executorSelectionSchema = z.enum(["AUTO", "FAKE", "CODEX", "CLAUDE"]);
 export type ExecutorSelection = z.infer<typeof executorSelectionSchema>;
 
 export const modelSelectionSchema = z.string().trim().min(1).max(200).regex(/^[A-Za-z0-9._:/-]+$/, "Model must be AUTO or a simple provider model identifier.");

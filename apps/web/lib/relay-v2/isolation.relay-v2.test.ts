@@ -45,9 +45,8 @@ const forbiddenRuntimePatterns = [
   /@project-relay\/providers/,
   /apps\/worker|apps\\worker/,
   /getSessionQueue|agent-sessions|conversation-message/,
-  /(?:from\s+|import\s*\()\s*["'](?:node:child_process|cross-spawn)["']/,
+  /(?:from\s+|import\s*\()\s*["']cross-spawn["']/,
   /(?:from\s+|import\s*\()\s*["'](?:openai|@anthropic-ai\/[^"']+|@google\/generative-ai|@google\/genai|@modelcontextprotocol\/[^"']+)["']/,
-  /\b(?:exec|execFile|execSync|execFileSync|spawn|spawnSync)\s*\(/,
   /\bshell\s*:\s*true\b/,
   /\bMcpServer\s*\(/,
   /api\.(?:openai|anthropic)\.com|generativelanguage\.googleapis\.com|api\.deepseek\.com/i,
@@ -71,7 +70,7 @@ const v2SourceRoots = [
   path.join(process.cwd(), "apps", "web", "lib", "relay-v2")
 ];
 
-describe("Relay v2 Milestone 2.1 execution isolation", () => {
+describe("Relay v2 Milestone 2.2 execution isolation", () => {
   it("walks the transitive workspace dependency graph and cannot reach execution infrastructure", async () => {
     const files = (await Promise.all(v2SourceRoots.map(sourceFiles))).flat();
     files.push(path.join(process.cwd(), "apps", "web", "lib", "api-errors.ts"), path.join(process.cwd(), "apps", "web", "lib", "csrf.ts"));
@@ -102,7 +101,7 @@ describe("Relay v2 Milestone 2.1 execution isolation", () => {
     expect(packages.get("@project-relay/local-safety")?.manifest.dependencies).toBeUndefined();
   });
 
-  it("contains no direct production import or call path to queues, providers, workers, or child processes", async () => {
+  it("contains no direct production import or call path to queues, providers, or workers", async () => {
     const roots = [
       ...v2SourceRoots,
       path.join(process.cwd(), "packages", "local-safety", "src"),
@@ -111,8 +110,28 @@ describe("Relay v2 Milestone 2.1 execution isolation", () => {
     for (const file of files) {
       const contents = await readFile(file, "utf8");
       expect(forbiddenRuntimeReferences(contents), `${path.relative(process.cwd(), file)} contains a forbidden runtime reference`).toEqual([]);
-      if (file.includes(`${path.sep}relay-v2-execution${path.sep}`) || file.includes(`${path.sep}api${path.sep}v2${path.sep}executions${path.sep}`)) {
-        expect(contents, `${path.relative(process.cwd(), file)} names a real provider integration`).not.toMatch(/\b(?:codex|claude|gemini|deepseek|mcp)\b/i);
+      expect(contents, `${path.relative(process.cwd(), file)} imports an unimplemented provider runtime`).not.toMatch(/(?:from\s+|import\s*\()\s*["'][^"']*(?:claude|gemini|deepseek|mcp)[^"']*["']/i);
+    }
+  });
+
+  it("allows child_process only inside the SafeProcessRunner boundary", async () => {
+    const files = (await Promise.all(v2SourceRoots.map(sourceFiles))).flat();
+    const processBoundary = path.join(process.cwd(), "packages", "relay-v2-execution", "src", "process-runner.ts");
+    const importPattern = /(?:from\s+|import\s*\()\s*["']node:child_process["']/;
+    const callers: string[] = [];
+    for (const file of files) if (importPattern.test(await readFile(file, "utf8"))) callers.push(file);
+    expect(callers).toEqual([processBoundary]);
+    const boundary = await readFile(processBoundary, "utf8");
+    expect(boundary).toContain("shell: false");
+    expect(boundary).not.toContain("shell: true");
+    for (const root of [
+      path.join(process.cwd(), "apps", "web", "app", "api", "v2"),
+      path.join(process.cwd(), "apps", "web", "app", "v2"),
+      path.join(process.cwd(), "apps", "web", "components", "relay-v2")
+    ]) {
+      for (const file of await sourceFiles(root)) {
+        const contents = await readFile(file, "utf8");
+        expect(contents).not.toMatch(/node:child_process|process-runner|\bspawn\s*\(/);
       }
     }
   });

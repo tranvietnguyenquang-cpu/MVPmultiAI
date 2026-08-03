@@ -1,6 +1,6 @@
-# Relay v2 Milestone 2.1 smoke test
+# Relay v2 Milestone 2.2 smoke test
 
-Status: manual checklist for implemented projects, tasks, approvals, SQLite execution, FakeExecutor, SSE, artifacts, and cancellation. It contains no real provider, command, Git mutation, MCP, or deployment step.
+Status: manual checklist for FakeExecutor and the approval-bound Codex CLI boundary. It contains no Claude/API/MCP/deployment or automatic Git-mutation step.
 
 ## Setup
 
@@ -72,9 +72,30 @@ npm run test:browser:v2
 
 Record exact results. Browser tests use disposable SQLite and verify approval, successful streamed FakeExecutor output, unapproved-task rejection, and cancellation. They do not start a provider or execute a project command.
 
+## Codex diagnostics and controlled execution
+
+1. Open `/v2/executors/codex` and choose **Test connection**.
+2. Verify sanitized path, exact version, authentication status, and only locally detected capabilities appear.
+3. Create a task with executor Codex, model/effort AUTO, workspace-write enabled, non-production confirmed, a timeout, and selected server-owned verification operations.
+4. Approve the exact snapshot. Inspect the Git baseline before Request Execution.
+5. On a clean disposable project, request Codex and verify capsule, PID, redacted live output, exact exit code, verification, final Git evidence, changed-file delta, artifacts, and released lease.
+6. Verify no Commit, Push, Merge, or Deploy control exists.
+7. For a dirty disposable project, verify default rejection. If dirty access was approved, acknowledge the exact displayed baseline hash and verify pre-existing changes remain distinguished.
+
+Real smoke is opt-in only:
+
+```powershell
+$env:RELAY_V2_REAL_CODEX_SMOKE = '1'
+npm run smoke:v2:codex
+```
+
+The helper creates and validates a clean committed Git repository outside Relay before Codex can start, then always removes it. It skips only for demonstrated CLI/capability/subscription-authentication unavailability; other nonzero exits fail. The Codex sandbox is read-only and no write smoke targets Relay.
+
+Latest recorded opt-in result: **PASSED** on 2026-08-02 with Codex `0.146.0-alpha.9.2`, exact process exit code `0`, authenticated subscription CLI state, and successful disposable-workspace cleanup.
+
 ## Expected limitations
 
-- FakeExecutor only; no real AI CLI or API.
-- No Git status, checkpoint, diff, test command, source write, Docker, or deployment behavior.
+- Real Codex is unavailable until local subscription login succeeds; the normal automated suite uses doubles only.
+- No automatic commit, push, merge, checkout, reset, stash, Docker, or deployment behavior.
 - Expired active sessions recover to `BLOCKED`; automatic retry is intentionally not implemented.
 - Artifact retention cleanup is planned.

@@ -22,6 +22,7 @@ describe("Prisma SQLite Milestone 1 feasibility", () => {
   it("applies the checked-in migration and enables foreign keys, WAL, and a busy timeout", async () => {
     const migrations = await client.$queryRawUnsafe<Array<{ migration_name: string }>>('SELECT migration_name FROM "_prisma_migrations"');
     expect(migrations.map(item => item.migration_name)).toContain("20260801000000_milestone1_init");
+    expect(migrations.map(item => item.migration_name)).toContain("20260803000000_milestone22_codex_cli");
     const foreignKeys = await client.$queryRawUnsafe<Array<{ foreign_keys: bigint }>>("PRAGMA foreign_keys");
     const journal = await client.$queryRawUnsafe<Array<{ journal_mode: string }>>("PRAGMA journal_mode");
     const busy = await client.$queryRawUnsafe<Array<{ timeout: bigint }>>("PRAGMA busy_timeout");
@@ -74,5 +75,23 @@ describe("Prisma SQLite Milestone 1 feasibility", () => {
     const audit = await client.auditEvent.create({ data: { id: randomUUID(), projectId: project.id, actor: "test", action: "PROJECT_CREATED", riskLevel: "SAFE", detailsJson: "{}" } });
     await expect(client.auditEvent.update({ where: { id: audit.id }, data: { actor: "changed" } })).rejects.toThrow(/append-only/i);
     await expect(client.auditEvent.delete({ where: { id: audit.id } })).rejects.toThrow(/append-only/i);
+  });
+
+  it("widens executor checks forward-only for FakeExecutor and Codex CLI metadata", async () => {
+    const project = await client.project.create({ data: projectData() });
+    const taskId = randomUUID();
+    await client.task.create({ data: {
+      id: taskId, projectId: project.id, idempotencyKey: randomUUID(), title: "fake", objective: "fake",
+      source: "MANUAL", taskType: "OTHER", complexity: "NORMAL", status: "PENDING_APPROVAL",
+      selectedExecutor: "FAKE", specHash: "hash", normalizedSpecJson: "{}"
+    } });
+    await expect(client.approval.create({ data: {
+      id: randomUUID(), taskId, approvalType: "TASK_EXECUTION", requestedBy: "test", status: "PENDING",
+      specHash: "hash", approvedSpecJson: "{}", executor: "FAKE", model: "AUTO", effort: "AUTO", reviewer: "NONE", permissionsJson: "[]"
+    } })).resolves.toMatchObject({ executor: "FAKE" });
+    await expect(client.executorCapabilitySnapshot.create({ data: {
+      id: randomUUID(), executorId: "codex-cli", executablePath: "C:\\codex.exe", displayPath: "%LOCALAPPDATA%\\codex.exe",
+      version: "fixture", authenticationStatus: "UNKNOWN", supported: false, snapshotJson: "{}", rawHelpHash: "0".repeat(64), detectedAt: new Date()
+    } })).resolves.toMatchObject({ executorId: "codex-cli" });
   });
 });

@@ -173,6 +173,19 @@ model ExecutionSession {
   approvedEffort          String
   approvedReviewer        String
   approvedPermissionsHash String
+  approvedTimeoutSeconds  Int      @default(1800)
+  approvedVerificationJson String  @default("[]")
+  dirtyBaselineAcknowledgedHash String?
+  capsuleHash             String?
+  capsuleJson             String   @default("{}")
+  baselineEvidenceJson    String   @default("{}")
+  finalEvidenceJson       String   @default("{}")
+  processId               Int?
+  processStartedAt        DateTime?
+  processIdentity         String?
+  processExitCode         Int?
+  processSignal           String?
+  verificationResultsJson String   @default("[]")
   queuedAt                DateTime @default(now())
   claimedAt               DateTime?
   startedAt               DateTime?
@@ -194,6 +207,22 @@ model ExecutionSession {
   @@index([status, queuedAt])
   @@index([taskId, createdAt])
   @@index([workspaceKey, status])
+}
+
+model ExecutorCapabilitySnapshot {
+  id                 String   @id
+  executorId         String
+  executablePath     String
+  displayPath        String
+  version            String
+  authenticationStatus String
+  supported          Boolean
+  snapshotJson       String
+  rawHelpHash        String
+  detectedAt         DateTime
+  createdAt          DateTime @default(now())
+
+  @@index([executorId, detectedAt])
 }
 
 model ExecutionEvent {

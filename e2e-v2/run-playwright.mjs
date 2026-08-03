@@ -10,6 +10,7 @@ const environment = {
   PORT: port,
   PROJECT_RELAY_BIND_HOST: "127.0.0.1",
   PROJECT_RELAY_TEST_MODE: "true",
+  RELAY_V2_CODEX_TEST_DOUBLE: "true",
   RELAY_V2_ENABLED: "true",
   RELAY_V2_DATA_DIR: dataDir,
   RELAY_V2_E2E_DATA_DIR: dataDir,

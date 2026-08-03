@@ -16,7 +16,7 @@ const handoff = {
   task: { title: "Execute fake work", objective: "Exercise the provider-neutral engine", taskType: "implementation", complexity: "normal" },
   constraints: ["Do not modify source files"],
   acceptanceCriteria: ["Fake execution reaches a validated result"],
-  execution: { executor: "codex", model: "auto", effort: "medium", reviewer: "claude", requireApproval: true, allowSourceTransmissionToApi: false }
+  execution: { executor: "fake", model: "auto", effort: "medium", reviewer: "claude", requireApproval: true, allowSourceTransmissionToApi: false }
 };
 
 describe("Relay v2 execution engine", () => {
@@ -100,7 +100,7 @@ describe("Relay v2 execution engine", () => {
   });
 
   it.each([
-    ["selectedExecutor", "CLAUDE"], ["selectedModel", "changed-model"], ["selectedEffort", "HIGH"], ["reviewer", "NONE"]
+    ["selectedExecutor", "CODEX"], ["selectedModel", "changed-model"], ["selectedEffort", "HIGH"], ["reviewer", "NONE"]
   ] as const)("invalidates approval when %s changes", async (field, value) => {
     const taskId = await task();
     await database.client.task.update({ where: { id: taskId }, data: { [field]: value } });

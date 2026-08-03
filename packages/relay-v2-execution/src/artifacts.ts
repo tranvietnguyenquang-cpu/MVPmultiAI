@@ -4,7 +4,7 @@ import path from "node:path";
 import { redactSecrets } from "@project-relay/local-safety";
 
 export type ArtifactMetadata = {
-  artifactType: "LOG" | "CHANGED_FILES";
+  artifactType: "LOG" | "CHANGED_FILES" | "CAPSULE" | "BASELINE_GIT" | "FINAL_GIT" | "PATCH" | "VERIFICATION";
   relativePath: string;
   sha256: string;
   byteCount: number;
@@ -21,6 +21,10 @@ export class ExecutionArtifactStore {
 
   private relative(absolutePath: string): string {
     return path.relative(this.artifactsRoot, absolutePath).replace(/\\/g, "/");
+  }
+
+  artifactDirectory(sessionId: string): string {
+    return this.relative(this.sessionDirectory(sessionId));
   }
 
   async initializeLog(sessionId: string): Promise<void> {
@@ -70,6 +74,33 @@ export class ExecutionArtifactStore {
       sha256: createHash("sha256").update(contents).digest("hex"),
       byteCount: contents.byteLength,
       truncated: false
+    };
+  }
+
+
+  async writeArtifact(
+    sessionId: string,
+    artifactType: Exclude<ArtifactMetadata["artifactType"], "LOG" | "CHANGED_FILES">,
+    filename: string,
+    value: unknown,
+    maxBytes = this.maxLogBytes
+  ): Promise<ArtifactMetadata> {
+    if (!/^[a-z0-9][a-z0-9.-]{0,100}$/i.test(filename)) throw new Error("Invalid execution artifact filename.");
+    const directory = this.sessionDirectory(sessionId);
+    await mkdir(directory, { recursive: true });
+    const target = path.join(directory, filename);
+    const temporary = path.join(directory, `.${filename}-${randomUUID()}.tmp`);
+    const serialized = typeof value === "string" ? value : JSON.stringify(value, null, 2);
+    const full = Buffer.from(`${redactSecrets(serialized)}\n`, "utf8");
+    const contents = full.subarray(0, maxBytes);
+    await writeFile(temporary, contents, { flag: "wx" });
+    await rename(temporary, target);
+    return {
+      artifactType,
+      relativePath: this.relative(target),
+      sha256: createHash("sha256").update(contents).digest("hex"),
+      byteCount: contents.byteLength,
+      truncated: full.byteLength > contents.byteLength
     };
   }
 }

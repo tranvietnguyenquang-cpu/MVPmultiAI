@@ -112,7 +112,14 @@ describe("Relay v2 Milestone 1 orchestrator", () => {
     expect(result.approval).toMatchObject({ status: "APPROVED", specHash: created.task.specHash, executor: "CODEX", model: "AUTO", effort: "MEDIUM", reviewer: "CLAUDE" });
     const snapshot = JSON.parse(result.approval.approvedSpecJson) as { specHash: string; permissions: unknown[] };
     expect(snapshot.specHash).toBe(created.task.specHash);
-    expect(snapshot.permissions).toEqual([{ permission: "ALLOW_SOURCE_TRANSMISSION_TO_API", value: false }]);
+    expect(snapshot.permissions).toEqual([
+      { permission: "ALLOW_SOURCE_TRANSMISSION_TO_API", value: false },
+      { permission: "WORKSPACE_WRITE", value: false },
+      { permission: "NON_PRODUCTION_CONFIRMED", value: false },
+      { permission: "ALLOW_DIRTY_WORKSPACE", value: false },
+      { permission: "TIMEOUT_SECONDS", value: 1800 },
+      { permission: "VERIFICATION_OPERATIONS", value: [] }
+    ]);
     const delegates = database.client as unknown as Record<string, unknown>;
     expect(delegates.workItem).toBeUndefined();
     expect(delegates.agentSession).toBeUndefined();

@@ -8,7 +8,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     await requireRelayV2Mutation(request);
     const input = v2ExecutionRequestSchema.parse(await request.json());
     const services = await getRelayV2ExecutionServices();
-    const result = await services.engine.requestExecution((await params).id, "local-user", input.fakeScenario);
+    const result = await services.engine.requestExecution((await params).id, "local-user", input);
     services.runtime.start();
     return NextResponse.json({ session: result.session, duplicate: result.duplicate, executionQueued: true }, { status: result.duplicate ? 200 : 201 });
   } catch (error) {

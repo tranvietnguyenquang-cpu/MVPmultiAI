@@ -1,6 +1,6 @@
 # Relay v2 security boundaries
 
-Status: Milestone 2 approval authority, SQLite execution claims, exclusive leases, redacted artifacts, SSE ownership, cancellation, timeout, and FakeExecutor isolation are implemented and tested. Milestone 2.1 hardens streaming, cancellation scoping, isolation coverage, and runtime diagnostics.
+Status: Milestones 2 through 2.2 are implemented and tested, including the approval-bound Codex CLI process boundary. No Claude/API/MCP/deployment integration is present.
 
 ## Local boundary
 
@@ -24,9 +24,22 @@ Project paths are revalidated as canonical Git roots before request and claim. A
 
 The dependency-free local-safety package redacts output before database previews, SSE, or artifacts. Environment files and credentials are not read. Artifact paths are generated below app-owned storage, never inside project source. Fake changed-file entries are simulated metadata.
 
+## Codex process boundary
+
+- API routes create durable requests or read diagnostics; they never import `child_process` or launch Codex directly.
+- Only `packages/relay-v2-execution/src/process-runner.ts` imports `node:child_process`.
+- Executables and workspaces are canonical absolute paths; argv is an array; `shell` is always false.
+- Task content is stdin, not a command argument. Model/effort flags are emitted only for verified supported selections.
+- Environment inheritance is limited to OS execution, PATH, user-profile authentication, temp, terminal/locale, and approved Codex configuration. Secret-like keys are denied and environment values are never logged.
+- Output is redacted before events, SSE, diagnostics, or artifacts.
+- Windows cancellation targets the exact owned PID tree; Relay never kills by process name or reattaches from PID alone.
+- Pre-spawn cancellation is checked before/through validation and around spawn. A termination failure retains process ownership and the workspace lease until exit rather than reporting a false completed cancellation.
+- Codex diagnostics responses use an explicit DTO. Raw executable paths remain server-side; browser/API responses expose only sanitized `displayPath` values.
+- Dirty-baseline evidence protects staged, unstaged, untracked, index, stash, HEAD, and branch identity. Suspected loss or concealment of pre-existing work blocks success.
+
 ## Dependency isolation
 
-Automated transitive graph tests cover the v2 packages, API routes, libraries, app routes, and Relay v2 UI components. They ensure these sources cannot reach legacy execution, provider adapters or SDKs, workers, Redis, BullMQ, cross-spawn, `node:child_process`, shell calls, MCP runtime code, external provider endpoints, or Git/Docker mutation paths. Display-only executor labels such as `CODEX` and `CLAUDE` are permitted and are not treated as integrations.
+Automated transitive graph tests cover the v2 packages, API routes, libraries, app routes, and Relay v2 UI components. They ensure these sources cannot reach legacy execution, provider SDKs, workers, Redis, BullMQ, cross-spawn, MCP, or external API endpoints. They prove `node:child_process` is reachable only from SafeProcessRunner and not UI/API sources. Display labels are not treated as integrations.
 
 Runtime-host operational diagnostics contain only bounded, redacted error messages; stack traces are not retained. Callback failures cannot break polling. A known owned session is identified for diagnostics, while engine cleanup or conservative stale recovery owns its durable lifecycle.
 
@@ -42,4 +55,4 @@ Legacy execution remains present and recoverable but was not changed by Mileston
 
 ## Planned
 
-Real local CLI execution, command risk classification, Git evidence, and dedicated dangerous-operation approvals begin only in a later explicitly approved milestone. Provider APIs, secure credentials, and MCP remain later work.
+Claude review, broader operation-risk catalogs, dedicated dangerous-operation approvals, secure API credentials, and MCP remain later work. Automatic Git mutation and deployment are not present.

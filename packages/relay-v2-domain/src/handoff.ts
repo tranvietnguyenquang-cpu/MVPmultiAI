@@ -20,6 +20,38 @@ const modelInputSchema = z.union([
   modelSelectionSchema
 ]);
 
+export const verificationOperationSchema = z.enum(["NPM_TEST", "NPM_TYPECHECK", "NPM_BUILD"]);
+export type VerificationOperation = z.infer<typeof verificationOperationSchema>;
+
+export const taskPermissionSchema = z.discriminatedUnion("permission", [
+  z.object({ permission: z.literal("ALLOW_SOURCE_TRANSMISSION_TO_API"), value: z.boolean() }).strict(),
+  z.object({ permission: z.literal("WORKSPACE_WRITE"), value: z.boolean() }).strict(),
+  z.object({ permission: z.literal("NON_PRODUCTION_CONFIRMED"), value: z.boolean() }).strict(),
+  z.object({ permission: z.literal("ALLOW_DIRTY_WORKSPACE"), value: z.boolean() }).strict(),
+  z.object({ permission: z.literal("TIMEOUT_SECONDS"), value: z.number().int().min(60).max(7_200) }).strict(),
+  z.object({ permission: z.literal("VERIFICATION_OPERATIONS"), value: z.array(verificationOperationSchema).max(3) }).strict()
+]);
+export type TaskPermissionValue = z.infer<typeof taskPermissionSchema>;
+
+export type ExecutionPolicy = {
+  workspaceWrite: boolean;
+  nonProductionConfirmed: boolean;
+  allowDirtyWorkspace: boolean;
+  timeoutSeconds: number;
+  verificationOperations: VerificationOperation[];
+};
+
+export function executionPolicyFromPermissions(permissions: readonly TaskPermissionValue[]): ExecutionPolicy {
+  const value = (permission: TaskPermissionValue["permission"]): unknown => permissions.find(item => item.permission === permission)?.value;
+  return {
+    workspaceWrite: value("WORKSPACE_WRITE") === true,
+    nonProductionConfirmed: value("NON_PRODUCTION_CONFIRMED") === true,
+    allowDirtyWorkspace: value("ALLOW_DIRTY_WORKSPACE") === true,
+    timeoutSeconds: typeof value("TIMEOUT_SECONDS") === "number" ? value("TIMEOUT_SECONDS") as number : 1_800,
+    verificationOperations: z.array(verificationOperationSchema).parse(value("VERIFICATION_OPERATIONS") ?? [])
+  };
+}
+
 export const relayHandoffV1Schema = z.object({
   version: z.literal(1, { errorMap: () => ({ message: "version must be 1." }) }),
   project: z.object({
@@ -36,19 +68,29 @@ export const relayHandoffV1Schema = z.object({
   constraints: z.array(boundedText("constraint", 2_000)).max(100).default([]),
   acceptanceCriteria: z.array(boundedText("acceptance criterion", 2_000)).min(1, "At least one acceptance criterion is required.").max(100),
   execution: z.object({
-    executor: z.enum(["auto", "codex", "claude"]).default("auto"),
+    executor: z.enum(["auto", "fake", "codex", "claude"]).default("fake"),
     model: modelInputSchema.default("auto"),
     effort: z.enum(["auto", "low", "medium", "high"]).default("auto"),
     reviewer: z.enum(["none", "auto", "codex", "claude"]).default("auto"),
     requireApproval: z.literal(true, { errorMap: () => ({ message: "Relay v2 requires execution.requireApproval to be true." }) }).default(true),
-    allowSourceTransmissionToApi: z.boolean().default(false)
+    allowSourceTransmissionToApi: z.boolean().default(false),
+    workspaceWrite: z.boolean().default(false),
+    nonProductionConfirmed: z.boolean().default(false),
+    allowDirtyWorkspace: z.boolean().default(false),
+    timeoutSeconds: z.number().int().min(60).max(7_200).default(1_800),
+    verificationOperations: z.array(verificationOperationSchema).max(3).default([])
   }).strict().default({
-    executor: "auto",
+    executor: "fake",
     model: "auto",
     effort: "auto",
     reviewer: "auto",
     requireApproval: true,
-    allowSourceTransmissionToApi: false
+    allowSourceTransmissionToApi: false,
+    workspaceWrite: false,
+    nonProductionConfirmed: false,
+    allowDirtyWorkspace: false,
+    timeoutSeconds: 1_800,
+    verificationOperations: []
   })
 }).strict();
 
@@ -75,7 +117,13 @@ export const normalizedTaskSpecSchema = z.object({
     reviewer: reviewerSelectionSchema,
     requireApproval: z.literal(true)
   }).strict(),
-  permissions: z.array(z.object({ permission: z.literal("ALLOW_SOURCE_TRANSMISSION_TO_API"), value: z.boolean() }).strict()).length(1)
+  permissions: z.array(taskPermissionSchema).min(1).max(6).superRefine((permissions, context) => {
+    const seen = new Set<string>();
+    permissions.forEach((permission, index) => {
+      if (seen.has(permission.permission)) context.addIssue({ code: z.ZodIssueCode.custom, path: [index, "permission"], message: "Permission entries must be unique." });
+      seen.add(permission.permission);
+    });
+  })
 }).strict().superRefine((spec, context) => {
   const fields: Array<{ path: Array<string | number>; value: string }> = [
     { path: ["task", "title"], value: spec.task.title },
@@ -145,7 +193,14 @@ export function normalizeHandoff(handoff: RelayHandoffV1): NormalizedTaskSpec {
       reviewer: reviewerSelectionSchema.parse(handoff.execution.reviewer.toUpperCase()),
       requireApproval: true
     },
-    permissions: [{ permission: "ALLOW_SOURCE_TRANSMISSION_TO_API", value: handoff.execution.allowSourceTransmissionToApi }]
+    permissions: [
+      { permission: "ALLOW_SOURCE_TRANSMISSION_TO_API", value: handoff.execution.allowSourceTransmissionToApi },
+      { permission: "WORKSPACE_WRITE", value: handoff.execution.workspaceWrite },
+      { permission: "NON_PRODUCTION_CONFIRMED", value: handoff.execution.nonProductionConfirmed },
+      { permission: "ALLOW_DIRTY_WORKSPACE", value: handoff.execution.allowDirtyWorkspace },
+      { permission: "TIMEOUT_SECONDS", value: handoff.execution.timeoutSeconds },
+      { permission: "VERIFICATION_OPERATIONS", value: handoff.execution.verificationOperations }
+    ]
   };
   const result = normalizedTaskSpecSchema.safeParse(normalized);
   if (!result.success) throw new HandoffValidationError(zodIssues(result.error));
@@ -242,4 +297,10 @@ execution:
   reviewer: claude
   requireApproval: true
   allowSourceTransmissionToApi: false
+  workspaceWrite: true
+  nonProductionConfirmed: true
+  allowDirtyWorkspace: false
+  timeoutSeconds: 1800
+  verificationOperations:
+    - NPM_TEST
 `;

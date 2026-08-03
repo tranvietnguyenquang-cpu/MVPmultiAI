@@ -43,7 +43,9 @@ export const executionEventTypeSchema = z.enum([
   "EXECUTION_REQUESTED", "SESSION_QUEUED", "SESSION_CLAIMED", "WORKSPACE_WAITING",
   "WORKSPACE_LOCKED", "EXECUTOR_PREPARING", "EXECUTION_STARTED", "OUTPUT_RECEIVED",
   "WARNING_RECEIVED", "CANCELLATION_REQUESTED", "EXECUTION_SUCCEEDED", "EXECUTION_FAILED",
-  "EXECUTION_TIMED_OUT", "EXECUTION_CANCELLED", "WORKSPACE_RELEASED", "STALE_SESSION_RECOVERED"
+  "EXECUTION_TIMED_OUT", "EXECUTION_CANCELLED", "WORKSPACE_RELEASED", "STALE_SESSION_RECOVERED",
+  "PROCESS_STARTED", "GIT_BASELINE_CAPTURED", "GIT_EVIDENCE_CAPTURED", "VERIFICATION_STARTED",
+  "VERIFICATION_COMPLETED"
 ]);
 export type ExecutionEventType = z.infer<typeof executionEventTypeSchema>;
 
@@ -51,14 +53,14 @@ export const executionEventLevelSchema = z.enum(["DEBUG", "INFO", "WARNING", "ER
 export type ExecutionEventLevel = z.infer<typeof executionEventLevelSchema>;
 
 export const executorEventSchema = z.object({
-  type: z.enum(["output", "warning", "result"]),
+  type: z.enum(["process", "output", "warning", "result"]),
   message: z.string().max(1_000_000),
   payload: z.record(z.unknown()).default({})
 }).strict();
 export type ExecutorEvent = z.infer<typeof executorEventSchema>;
 
 export const executionOutcomeSchema = z.object({
-  status: z.enum(["succeeded", "failed", "timed_out", "cancelled"]),
+  status: z.enum(["succeeded", "failed", "timed_out", "cancelled", "blocked"]),
   summary: z.string().max(20_000),
   failureCode: z.string().max(100).optional(),
   failureMessage: z.string().max(4_000).optional()

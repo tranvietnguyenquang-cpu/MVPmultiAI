@@ -1,6 +1,7 @@
 import type {
-  ExecutionOutcome, ExecutorDescriptor, ExecutorEvent, FakeExecutorScenario
+  ExecutionOutcome, ExecutorDescriptor, ExecutorEvent, FakeExecutorScenario, TaskPermissionValue, VerificationOperation
 } from "@project-relay/relay-v2-domain";
+import type { ExecutionCapsule } from "./execution-capsule.js";
 
 export type ExecutorValidationRequest = {
   sessionId: string;
@@ -8,6 +9,9 @@ export type ExecutorValidationRequest = {
   approvedExecutor: string;
   approvedModel: string;
   approvedEffort: string;
+  approvedPermissions: TaskPermissionValue[];
+  timeoutMs: number;
+  verificationOperations: VerificationOperation[];
 };
 
 export type ExecutorValidationResult = { valid: true } | { valid: false; reason: string };
@@ -17,12 +21,20 @@ export type ExecutionContext = ExecutorValidationRequest & {
   projectId: string;
   title: string;
   objective: string;
+  taskContext: string;
+  constraints: string[];
+  acceptanceCriteria: string[];
+  approvedReviewer: string;
+  capsule?: ExecutionCapsule;
   scenario?: FakeExecutorScenario;
 };
 
 export type PreparedExecution = {
   executionId: string;
   context: ExecutionContext;
+  argv?: string[];
+  executablePath?: string;
+  stdin?: string;
 };
 
 export type ExecutionControls = {

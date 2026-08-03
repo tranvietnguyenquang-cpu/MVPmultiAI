@@ -1,6 +1,6 @@
 # Relay v2 local setup
 
-Status: Milestones 1 and 2 implemented. The provider-neutral engine and FakeExecutor are tested; real AI providers, command execution, MCP, and remote access are not implemented.
+Status: Milestones 1 through 2.2 implemented. FakeExecutor and the local Codex CLI boundary are tested with doubles; this machine's real Codex CLI is installed but unauthenticated. Claude, provider APIs, MCP, and remote access are not implemented.
 
 ## Prerequisites
 
@@ -8,7 +8,7 @@ Status: Milestones 1 and 2 implemented. The provider-neutral engine and FakeExec
 - Node.js and npm supported by this repository
 - A local Git repository to register
 
-The v2 workflow does not require a running PostgreSQL server, Redis, BullMQ worker, real AI CLI, or API credential. Legacy application prerequisites remain unchanged.
+FakeExecutor does not require PostgreSQL, Redis, BullMQ, a CLI, or API credentials. Codex execution requires a supported local Codex CLI subscription login. Legacy application prerequisites remain unchanged.
 
 ## Initialize
 
@@ -31,7 +31,15 @@ $env:RELAY_V2_EXECUTION_ENABLED = 'true'
 
 Set `RELAY_V2_EXECUTION_ENABLED=false` to disable execution routes and UI while retaining Milestone 1 task handling.
 
-Start the existing web application and open `/v2`. The in-process v2 runtime starts its bounded SQLite polling loop when an execution screen or request initializes it. It is separate from the legacy worker and imports no legacy queue or provider package.
+Start the existing web application and open `/v2`. The v2 runtime starts its bounded SQLite polling loop when an execution screen or request initializes it. It is separate from the legacy worker and imports no legacy queue or provider package. Open `/v2/executors/codex` to persist a sanitized capability snapshot.
+
+Optional executable override:
+
+```powershell
+$env:RELAY_V2_CODEX_PATH = 'C:\absolute\path\to\codex.exe'
+```
+
+Relay otherwise checks `PATH` and the local Codex app installation below `%LOCALAPPDATA%`. Normal `USERPROFILE`/`HOME` access is inherited for subscription authentication, but credential files are never read or logged by Relay.
 
 ## SQLite behavior
 
@@ -49,12 +57,12 @@ npm run build
 npm run test:browser:v2
 ```
 
-See `docs/SMOKE_TEST.md`. Real CLI smoke tests are not part of Milestone 2.
+See `docs/SMOKE_TEST.md`. Real Codex smoke is opt-in by setting `RELAY_V2_REAL_CODEX_SMOKE=1` before `npm run smoke:v2:codex`; it uses a disposable read-only workspace.
 
 ## Limitations
 
-- Only FakeExecutor is registered.
-- Fake scenario configuration is an explicit Milestone 2 diagnostic facility and is not a provider model selection.
+- FakeExecutor and Codex CLI are registered; Codex remains unavailable until diagnostics verify installation, capabilities, and login.
+- Explicit Codex model/effort values remain blocked without a verified local catalog; AUTO omits overrides.
 - Runtime hosting is in the local Next server process; durable queued sessions survive restart, while an expired active owner is recovered conservatively to `BLOCKED`.
 - Legacy migration remains report-only.
 - Portable mode and automated artifact retention are not implemented.

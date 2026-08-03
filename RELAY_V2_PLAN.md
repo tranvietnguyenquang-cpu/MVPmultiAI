@@ -643,11 +643,12 @@ Exit: SSE reconnect, cancel authorization, UI isolation, and runtime-host failur
 
 ### Milestone 2.2 — workspace runtime and Codex executor
 
-- Adapt path containment, Git inspection, process ownership, redaction, cancellation, timeouts, events/SSE, and the native runtime host.
-- Replace Redis/BullMQ for v2 with SQLite work claims and canonical workspace leases.
-- Implement SAFE/REVIEW/DANGEROUS/BLOCKED classification and dedicated approvals.
-- Implement Codex executable/version/help discovery, capability parsing, supported argv construction, diagnostics, incremental artifacts, pre/post Git snapshots, diff/results UI, retry recommendation, and failure truthfulness.
-- Keep legacy execution disabled when v2 runtime authority is enabled.
+- **Implemented:** dependency-isolated path containment, read-only Git evidence, exact process ownership, redaction, cancellation, timeouts, persisted events/SSE, and native runtime hosting.
+- **Implemented:** SQLite claims and canonical workspace leases remain the only v2 work-delivery mechanism; Redis/BullMQ are not used by v2.
+- **Implemented:** approval-bound Codex write/non-production/timeout/verification/dirty-baseline policy. **Partial:** the broader SAFE/REVIEW/DANGEROUS/BLOCKED operation catalog and dedicated dangerous-operation approvals remain a later hardening item.
+- **Implemented:** Codex executable/version/help discovery, sanitized capability snapshots, safe argv/stdin construction, diagnostics, bounded artifacts, pre/post Git evidence, result UI, and process/verification failure truthfulness. **Planned:** retry recommendation.
+- **Hardened:** disposable real smoke uses a validated committed Git repository outside Relay; cancellation closes every pre/post-spawn window and retains leases until owned-process exit; diagnostics never expose raw executable paths; authentication evidence refreshes and remains distinct from execution truth; dirty baselines protect index, stash, and pre-existing path/content identity.
+- **Implemented:** legacy execution remains unchanged and cannot own v2 sessions.
 
 Exit: unit/integration tests pass; real Codex smoke test passes or is explicitly skipped because CLI/auth is absent; no unsupported configuration is silently accepted.
 

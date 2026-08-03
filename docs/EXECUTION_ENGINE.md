@@ -1,6 +1,6 @@
 # Relay v2 execution engine
 
-Status: **implemented and tested in Milestone 2, with runtime and streaming hardening in Milestone 2.1**. Only the in-process `FakeExecutor` is implemented. Real local CLI adapters begin in the next explicitly approved milestone.
+Status: **implemented and tested through Milestone 2.2**. FakeExecutor remains the deterministic diagnostic executor; `CodexCliExecutor` is the only real local CLI executor. Claude and API providers are not implemented.
 
 ## Lifecycle
 
@@ -30,7 +30,17 @@ Only `ExecutionEngine` changes execution lifecycle state. Invalid application-se
 
 Before creating `QUEUED`, the engine checks task status, the approved approval record, specification hash, approved snapshot, executor/model/effort/reviewer, canonical permissions hash, project identity, canonical Git-root workspace, and absence of another active task execution. A stale approved value invalidates the approval and returns the task to `PENDING_APPROVAL`; the engine never manufactures replacement approval.
 
-The FakeExecutor descriptor is non-writing. Its `executorId` is `fake`; approved executor/model fields remain immutable metadata from the task approval.
+The FakeExecutor descriptor is non-writing. Its `executorId` is `fake`. Codex uses `codex-cli` and additionally requires approved workspace-write, non-production confirmation, timeout, verification catalog, and dirty-workspace policy. Changing any approved field invalidates authority.
+
+## Codex execution capsule and Git evidence
+
+Before queueing Codex, the engine captures a stable Git baseline and builds a sanitized, hashed execution capsule containing only the approved task, policy, workspace identity, Git branch/HEAD/status, timeout, and server-owned verification operations. Task prose is transported through stdin, never argv. `.env` contents, credentials, private keys, dumps, unrelated files, and conversation history are excluded.
+
+Write-capable Codex is blocked on a dirty workspace by default. A non-critical task may proceed only when `ALLOW_DIRTY_WORKSPACE` was approved and the request acknowledges the exact stable baseline hash. Critical tasks require a clean workspace. Relay never stashes, resets, checks out, stages, commits, pushes, merges, or discards changes.
+
+The baseline also protects existing work with content hashes, index object identity, staged/unstaged/untracked path sets, and stash-ref/list identity. Final evidence separately reports destroyed changes, hidden staging/worktree state, changed stash identity, unaccounted paths, and HEAD/branch movement. Any such signal blocks an otherwise successful Codex run. This is strong evidence-based detection, not a claim that every possible Git/filesystem concealment technique can be identified.
+
+Post-run evidence captures branch, HEAD, status, content hashes, binary metadata, staged/unstaged/untracked state, bounded patch evidence, and a baseline-to-final delta. Pre-existing paths are marked separately from session-created changes. A branch or HEAD mutation blocks an otherwise successful run.
 
 ## Durable claims and leases
 
@@ -70,6 +80,14 @@ Every scheduled runtime tick has a top-level error boundary. Unexpected claim, r
 
 Execution cancellation requires the owning `projectId` and returns the same not-found response for absent and wrong-project sessions before invoking the engine.
 
+## Local process and verification boundary
+
+Only `SafeProcessRunner` imports `node:child_process`. It validates absolute executable and working-directory paths, uses argv arrays and `shell: false`, passes an allowlisted environment, records exact PID/start identity, streams redacted output, bounds artifacts, and owns cancellation/timeout. On Windows, process-tree termination targets only the owned PID with argument-array `taskkill.exe`.
+
+Abort observation begins before asynchronous validation and is rechecked before and immediately after spawn. After ownership exists, cancellation/timeout converges on one termination promise. The executor stream cannot finish normally until actual child exit, so `ExecutionEngine` cannot finalize or release the lease while the process remains owned.
+
+The server-owned verification catalog currently supports `npm test`, `npm run typecheck`, and `npm run build` through Node plus npm's CLI entry point—never an arbitrary task-supplied shell string. Exit zero without passing the approved verification list is `FAILED`, not accepted success.
+
 ## Planned
 
-The next milestone may implement a real local executor adapter only after explicit approval. It must use this engine and cannot bypass approval, claims, events, artifacts, timeout, cancellation, or leases.
+Claude review begins only in the next separately approved milestone. Automatic commit, merge, push, deployment, MCP, and API providers remain planned.

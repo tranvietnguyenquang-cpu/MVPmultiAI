@@ -1,7 +1,7 @@
 import type { NextRequest } from "next/server";
 import { getRelayV2Database } from "@project-relay/relay-v2-persistence";
 import { RelayV2Orchestrator } from "@project-relay/relay-v2-orchestrator";
-import { ExecutionArtifactStore, ExecutionEngine, ExecutionRuntimeHost, FakeExecutor } from "@project-relay/relay-v2-execution";
+import { CodexCliExecutor, ExecutionArtifactStore, ExecutionEngine, ExecutionRuntimeHost, FakeExecutor } from "@project-relay/relay-v2-execution";
 import { ApiError } from "../api-errors.js";
 import { classifyRequest } from "../csrf.js";
 import { isLoopbackRequestHeaders } from "@project-relay/shared";
@@ -58,7 +58,10 @@ export function getRelayV2ExecutionServices(): Promise<RelayV2ExecutionServices>
   assertRelayV2ExecutionEnabled();
   executionGlobal.relayV2ExecutionServices ??= (async () => {
     const { client, paths } = await getRelayV2Database();
-    const engine = new ExecutionEngine(client, new FakeExecutor(), new ExecutionArtifactStore(paths.artifactsDir));
+    const codex = process.env.PROJECT_RELAY_TEST_MODE === "true" && process.env.RELAY_V2_CODEX_TEST_DOUBLE === "true"
+      ? (await import("./codex-test-double.js")).createBrowserCodexTestDouble()
+      : new CodexCliExecutor();
+    const engine = new ExecutionEngine(client, [new FakeExecutor(), codex], new ExecutionArtifactStore(paths.artifactsDir));
     return { engine, runtime: new ExecutionRuntimeHost(engine) };
   })();
   return executionGlobal.relayV2ExecutionServices;

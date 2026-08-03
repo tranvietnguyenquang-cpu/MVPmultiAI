@@ -32,7 +32,12 @@ export function RelayV2ManualTaskForm({ projects }: { projects: ProjectOption[] 
       acceptanceCriteria: lines("acceptanceCriteria"),
       execution: {
         executor: form.get("executor"), model: form.get("model") || "auto", effort: form.get("effort"),
-        reviewer: form.get("reviewer"), requireApproval: true, allowSourceTransmissionToApi: false
+        reviewer: form.get("reviewer"), requireApproval: true, allowSourceTransmissionToApi: false,
+        workspaceWrite: form.get("workspaceWrite") === "on",
+        nonProductionConfirmed: form.get("nonProductionConfirmed") === "on",
+        allowDirtyWorkspace: form.get("allowDirtyWorkspace") === "on",
+        timeoutSeconds: Number(form.get("timeoutSeconds") || 1800),
+        verificationOperations: ["NPM_TEST", "NPM_TYPECHECK", "NPM_BUILD"].filter(operation => form.get(operation) === "on")
       }
     };
     try {
@@ -57,9 +62,10 @@ export function RelayV2ManualTaskForm({ projects }: { projects: ProjectOption[] 
     <div className="two"><label>Title<input name="title" required maxLength={200}/></label><label>Task type<select name="taskType" defaultValue="implementation"><option value="implementation">Implementation</option><option value="bugfix">Bug fix</option><option value="documentation">Documentation</option><option value="analysis">Analysis</option><option value="migration">Migration</option><option value="security">Security</option><option value="operations">Operations</option><option value="other">Other</option></select></label></div>
     <label>Objective<textarea name="objective" required/></label>
     <label>Context<textarea name="context"/></label>
-    <div className="two"><label>Complexity<select name="complexity" defaultValue="normal"><option value="trivial">Trivial</option><option value="normal">Normal</option><option value="complex">Complex</option><option value="critical">Critical</option></select></label><label>Executor<select name="executor" defaultValue="codex"><option value="auto">Auto</option><option value="codex">Codex</option><option value="claude">Claude</option></select></label></div>
+    <div className="two"><label>Complexity<select name="complexity" defaultValue="normal"><option value="trivial">Trivial</option><option value="normal">Normal</option><option value="complex">Complex</option><option value="critical">Critical</option></select></label><label>Executor<select name="executor" defaultValue="fake"><option value="fake">FakeExecutor</option><option value="codex">Codex CLI</option><option value="auto">Auto (not executable)</option></select></label></div>
     <div className="two"><label>Model<input name="model" defaultValue="auto"/></label><label>Effort<select name="effort" defaultValue="auto"><option value="auto">Auto</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option></select></label></div>
-    <label>Reviewer<select name="reviewer" defaultValue="claude"><option value="none">None</option><option value="auto">Auto</option><option value="codex">Codex</option><option value="claude">Claude</option></select></label>
+    <label>Reviewer<select name="reviewer" defaultValue="none"><option value="none">None</option><option value="auto">Auto</option><option value="codex">Codex</option><option value="claude">Claude (planned)</option></select></label>
+    <fieldset><legend>Approved execution policy</legend><div className="stack"><label><input type="checkbox" name="workspaceWrite"/> Allow workspace writes (required for Codex)</label><label><input type="checkbox" name="nonProductionConfirmed"/> Confirm this is a non-production target</label><label><input type="checkbox" name="allowDirtyWorkspace"/> Permit an exact dirty baseline acknowledgement</label><label>Timeout seconds<input name="timeoutSeconds" type="number" min="60" max="7200" defaultValue="1800"/></label><strong>Relay-owned verification</strong><label><input type="checkbox" name="NPM_TEST"/> npm test</label><label><input type="checkbox" name="NPM_TYPECHECK"/> npm run typecheck</label><label><input type="checkbox" name="NPM_BUILD"/> npm run build</label></div></fieldset>
     <div className="two"><label>Constraints, one per line<textarea name="constraints"/></label><label>Acceptance criteria, one per line<textarea name="acceptanceCriteria" required/></label></div>
     <p className="subtle">Creation always ends at PENDING_APPROVAL. No provider is contacted.</p>
     {error ? <pre className="warn">{error}</pre> : null}
