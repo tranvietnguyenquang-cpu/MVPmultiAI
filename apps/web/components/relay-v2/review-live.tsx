@@ -15,6 +15,8 @@ export type ReviewRequestDto = {
   verdicts: Verdict[]; events: ReviewEvent[];
 };
 
+export type LatestInvocationDto = { status: string; reviewerId: string; cliVersion: string; reviewMaterialHash: string; promptHash: string } | null;
+
 const TERMINAL = new Set(["APPROVED", "REJECTED", "NEEDS_CHANGES", "ERROR", "CANCELLED", "STALE"]);
 const CANCELLING = new Set(["CANCELLATION_REQUESTED"]);
 const SEVERITY_ORDER = ["BLOCKER", "HIGH", "MEDIUM", "LOW", "INFO"] as const;
@@ -25,8 +27,9 @@ function statusPillClass(status: string): string {
   return "";
 }
 
-export function RelayV2ReviewLive({ reviewRequestId, projectId, initial }: { reviewRequestId: string; projectId: string; initial: ReviewRequestDto }) {
+export function RelayV2ReviewLive({ reviewRequestId, projectId, initial, initialInvocation }: { reviewRequestId: string; projectId: string; initial: ReviewRequestDto; initialInvocation?: LatestInvocationDto }) {
   const [review, setReview] = useState(initial);
+  const [invocation, setInvocation] = useState<LatestInvocationDto>(initialInvocation ?? null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const terminal = TERMINAL.has(review.status);
@@ -41,9 +44,10 @@ export function RelayV2ReviewLive({ reviewRequestId, projectId, initial }: { rev
         try {
           const response = await relayV2Fetch(`/api/v2/reviews/${reviewRequestId}?projectId=${encodeURIComponent(projectId)}`);
           if (response.ok) {
-            const result = await response.json() as { reviewRequest: ReviewRequestDto };
+            const result = await response.json() as { reviewRequest: ReviewRequestDto; latestInvocation: LatestInvocationDto };
             if (!cancelled) {
               setReview(result.reviewRequest);
+              setInvocation(result.latestInvocation);
               if (TERMINAL.has(result.reviewRequest.status)) stopped.current = true;
             }
           }
@@ -80,6 +84,15 @@ export function RelayV2ReviewLive({ reviewRequestId, projectId, initial }: { rev
       {!terminal ? <button className="button secondary" disabled={busy || CANCELLING.has(review.status)} onClick={cancel}>{CANCELLING.has(review.status) ? "Cancelling…" : "Cancel Review"}</button> : null}
     </div>
     {review.reviewAuthority === "DIAGNOSTIC" ? <p className="subtle">DIAGNOSTIC review: this verdict is displayable but can never satisfy a future auto-commit or acceptance gate.</p> : null}
+    {invocation ? <section className="card mono">
+      <h3>Reviewer Invocation</h3>
+      <div className="stack">
+        <div>Reviewer: {invocation.reviewerId} {invocation.cliVersion ? `· v${invocation.cliVersion}` : ""}</div>
+        <div>Invocation status: <span className="pill">{invocation.status}</span></div>
+        {invocation.reviewMaterialHash ? <div>Material hash: {invocation.reviewMaterialHash.slice(0, 16)}...</div> : null}
+        {invocation.promptHash ? <div>Prompt hash: {invocation.promptHash.slice(0, 16)}...</div> : null}
+      </div>
+    </section> : null}
     {error ? <p className="warn">{error}</p> : null}
     {review.failureCode ? <p className="warn mono">{review.failureCode}: {review.failureMessage}</p> : null}
 

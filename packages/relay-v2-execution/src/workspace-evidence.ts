@@ -2,11 +2,17 @@ import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { lstat, realpath } from "node:fs/promises";
 import path from "node:path";
-import { canonicalJson } from "@project-relay/relay-v2-domain";
+import {
+  boundTextToBytes, canonicalJson, RELAY_PATCH_STAGED_MARKER, RELAY_PATCH_UNSTAGED_MARKER, sha256OfText,
+  untruncatedProvenance, type ProducerTruncation
+} from "@project-relay/relay-v2-domain";
 import { redactSecrets } from "@project-relay/local-safety";
 import { SafeProcessRunner, type ProcessRunner } from "./process-runner.js";
 
 const SENSITIVE_PATH = /(^|\/)(?:\.env(?:\.|$)|credentials?(?:\.|$)|secrets?(?:\.|$)|id_(?:rsa|ed25519)|[^/]+\.(?:pem|key|p12|pfx))$/i;
+
+/** Inserted where a producer-truncated patch was cut, and counted toward the stored bytes -- never a silent gap. */
+const PATCH_OMISSION_MARKER = "\n...[patch truncated by the execution evidence writer]...\n";
 
 export type GitStatusEntry = {
   path: string;
@@ -45,6 +51,15 @@ export type GitEvidence = {
   patchPreview: string;
   patchSha256: string;
   patchTruncated: boolean;
+  /**
+   * Truthful provenance for `patchPreview`, computed from the COMPLETE
+   * redacted diff before any cut: original/included/omitted byte counts, the
+   * truncation method, and the SHA-256 of the whole thing. `patchSha256`
+   * remains the hash of what is actually stored here; `patchProvenance.
+   * fullContentSha256` is the hash of what existed before truncation, and the
+   * two differ exactly when bytes were lost.
+   */
+  patchProvenance: ProducerTruncation;
   patchOmittedForSensitivePaths: boolean;
   stashRef?: string | null;
   stashListHash?: string;
@@ -228,21 +243,41 @@ export class WorkspaceEvidenceService {
     }
     const patchOmittedForSensitivePaths = status.some(item => item.sensitive);
     let patchPreview = "";
-    let patchTruncated = false;
+    let patchProvenance = untruncatedProvenance("");
     if (!patchOmittedForSensitivePaths) {
       const [staged, unstaged] = await Promise.all([
         this.command(git, repositoryRoot, ["diff", "--cached", "--binary", "--no-ext-diff"], this.maxPatchBytes),
         this.command(git, repositoryRoot, ["diff", "--binary", "--no-ext-diff"], this.maxPatchBytes)
       ]);
-      patchPreview = redactSecrets(`--- STAGED ---\n${staged.stdout}\n--- UNSTAGED ---\n${unstaged.stdout}`);
-      patchTruncated = staged.truncated || unstaged.truncated || Buffer.byteLength(patchPreview, "utf8") > this.maxPatchBytes;
-      if (Buffer.byteLength(patchPreview, "utf8") > this.maxPatchBytes) patchPreview = Buffer.from(patchPreview).subarray(0, this.maxPatchBytes).toString("utf8");
+      // The COMPLETE redacted diff, measured and hashed before any cut --
+      // the counts below can never be back-inferred from the shortened
+      // result, which is why they are taken here and not after.
+      // The section markers come from the shared contract, so the consumers
+      // that must split on them before parsing diff headers cannot drift from
+      // the producer that writes them.
+      const completePatch = redactSecrets(`${RELAY_PATCH_STAGED_MARKER}\n${staged.stdout}\n${RELAY_PATCH_UNSTAGED_MARKER}\n${unstaged.stdout}`);
+      // `staged.truncated`/`unstaged.truncated` mean the bounded process read
+      // already discarded an UNKNOWN number of bytes upstream, so the true
+      // original size is not knowable; that is reported as `captureTruncated`
+      // rather than guessed at.
+      const captureTruncated = staged.truncated || unstaged.truncated;
+      const bounded = boundTextToBytes(completePatch, this.maxPatchBytes, "HEAD", PATCH_OMISSION_MARKER);
+      patchPreview = bounded.text;
+      patchProvenance = bounded.truncated
+        ? {
+            producerTruncated: true, captureTruncated,
+            originalByteCount: bounded.originalByteCount, includedByteCount: bounded.includedContentByteCount,
+            omittedByteCount: bounded.omittedByteCount, truncationMethod: bounded.truncationMethod,
+            fullContentSha256: sha256OfText(completePatch)
+          }
+        : untruncatedProvenance(completePatch, captureTruncated);
     }
+    const patchTruncated = patchProvenance.producerTruncated || patchProvenance.captureTruncated;
     const evidenceForHash = {
       repositoryRoot, branch: branchResult.stdout.trim() || "DETACHED", head: headResult.stdout.trim(), dirty: status.length > 0,
       status, stagedCount: status.filter(item => item.staged).length, unstagedCount: status.filter(item => item.unstaged).length,
       untrackedCount: status.filter(item => item.untracked).length, patchPreview,
-      patchSha256: createHash("sha256").update(patchPreview).digest("hex"), patchTruncated, patchOmittedForSensitivePaths
+      patchSha256: createHash("sha256").update(patchPreview).digest("hex"), patchTruncated, patchProvenance, patchOmittedForSensitivePaths
       , stashRef: stashRefResult.exitCode === 0 ? stashRefResult.stdout.trim() : null,
       stashListHash: createHash("sha256").update(stashListResult.stdout).digest("hex"),
       indexIdentitySha256: createHash("sha256").update(indexResult.stdout).digest("hex"),

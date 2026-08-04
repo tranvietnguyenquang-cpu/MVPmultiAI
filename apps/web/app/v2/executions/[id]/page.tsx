@@ -45,7 +45,7 @@ export default async function RelayV2ExecutionDetail({ params, searchParams }: {
         {reviewGate.reviewRequestId ? <span className={`pill ${reviewGate.authority === "AUTHORITATIVE" ? "" : "warn"}`}>{reviewGate.authority}</span> : null}
       </div>
       <p className="subtle">Commit-authority eligible: {reviewGate.commitAuthorityEligible ? "yes" : "no"} &mdash; Milestone 2.3A has no auto-commit policy, so this is always &ldquo;no&rdquo;.</p>
-      <RelayV2ReviewActions sessionId={session.id} projectId={session.projectId} eligible={reviewEligible} />
+      <RelayV2ReviewActions sessionId={session.id} projectId={session.projectId} eligible={reviewEligible} approvedReviewer={session.approvedReviewer} />
       {reviews.length ? <div className="stack mono">{reviews.map(review => {
         const label = review.status === "APPROVED" && review.reviewAuthority === "DIAGNOSTIC" ? "Diagnostic approval" : review.status;
         return <div className="row" key={review.id}><Link href={`/v2/reviews/${review.id}?projectId=${session.projectId}`}>{review.id.slice(0, 8)}...</Link><span className={`pill ${review.status === "APPROVED" ? "good" : ["REJECTED", "ERROR", "STALE"].includes(review.status) ? "warn" : ""}`}>{label}</span><span>attempt {review.attempt}</span></div>;

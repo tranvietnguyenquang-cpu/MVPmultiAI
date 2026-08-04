@@ -27,6 +27,20 @@ describe("VerificationCatalogRunner", () => {
     expect(processDouble.requests[1]?.args.slice(-2)).toEqual(["run", "typecheck"]);
     expect(processDouble.requests.every(request => pathIsAbsolute(request.executablePath))).toBe(true);
   });
+
+  it("stamps each result with a self-consistent resultHash covering every other field", async () => {
+    const processDouble = new VerificationProcessDouble([0]);
+    const runner = new VerificationCatalogRunner(processDouble, process.execPath);
+    const results = await runner.run({
+      sessionId: "session", workspacePath: process.cwd(), operations: ["NPM_TEST"],
+      timeoutMs: 1_000, signal: new AbortController().signal
+    });
+    const { resultHash, ...rest } = results[0]!;
+    expect(resultHash).toMatch(/^[a-f0-9]{64}$/);
+    const { createHash } = await import("node:crypto");
+    const { canonicalJson } = await import("@project-relay/relay-v2-domain");
+    expect(createHash("sha256").update(canonicalJson(rest), "utf8").digest("hex")).toBe(resultHash);
+  });
 });
 
 function pathIsAbsolute(value: string): boolean { return /^(?:[A-Za-z]:[\\/]|\/)/.test(value); }

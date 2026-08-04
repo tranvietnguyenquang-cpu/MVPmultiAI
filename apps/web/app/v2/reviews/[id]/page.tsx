@@ -13,6 +13,8 @@ export default async function RelayV2ReviewDetail({ params, searchParams }: { pa
   if (!reviewRequest || (projectId && reviewRequest.projectId !== projectId)) notFound();
   reviewRuntime.start();
 
+  const latestInvocation = await reviewEngine.latestInvocation(reviewRequest.id);
+
   const { engine: executionEngine } = await getRelayV2ExecutionServices();
   const session = await executionEngine.getSession(reviewRequest.executionSessionId);
   const verification = session ? JSON.parse(session.verificationResultsJson) as Array<{ operation: string; passed: boolean; summary: string }> : [];
@@ -75,7 +77,7 @@ export default async function RelayV2ReviewDetail({ params, searchParams }: { pa
         {verification.length ? <div className="stack">{verification.map(result => <div className="row" key={result.operation}><strong>{result.operation}</strong><span className={`pill ${result.passed ? "good" : "warn"}`}>{result.passed ? "PASSED" : "FAILED"}</span><span>{result.summary}</span></div>)}</div> : <p className="subtle">No Relay-owned verification result recorded for this execution.</p>}
       </section>
       <section className="card span12">
-        <RelayV2ReviewLive reviewRequestId={reviewRequest.id} projectId={reviewRequest.projectId} initial={dto} />
+        <RelayV2ReviewLive reviewRequestId={reviewRequest.id} projectId={reviewRequest.projectId} initial={dto} initialInvocation={latestInvocation} />
       </section>
     </div>
   </>;

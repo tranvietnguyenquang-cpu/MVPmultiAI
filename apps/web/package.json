@@ -17,6 +17,7 @@
     "@project-relay/local-safety": "0.1.0",
     "@project-relay/project-memory": "0.1.0",
     "@project-relay/providers": "0.1.0",
+    "@project-relay/relay-v2-claude-reviewer": "0.1.0",
     "@project-relay/relay-v2-domain": "0.1.0",
     "@project-relay/relay-v2-execution": "0.1.0",
     "@project-relay/relay-v2-orchestrator": "0.1.0",

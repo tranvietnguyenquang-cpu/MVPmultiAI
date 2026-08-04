@@ -46,6 +46,9 @@ const forbiddenRuntimePatterns = [
   /apps\/worker|apps\\worker/,
   /getSessionQueue|agent-sessions|conversation-message/,
   /(?:from\s+|import\s*\()\s*["']cross-spawn["']/,
+  // Real Claude CLI integration (Milestone 2.3B) is a subprocess adapter, never an
+  // Anthropic API/SDK integration. This pattern stays forbidden even though "claude"
+  // itself is now a legitimate import (see the narrowed check further down this file).
   /(?:from\s+|import\s*\()\s*["'](?:openai|@anthropic-ai\/[^"']+|@google\/generative-ai|@google\/genai|@modelcontextprotocol\/[^"']+)["']/,
   /\bshell\s*:\s*true\b/,
   /\bMcpServer\s*\(/,
@@ -65,6 +68,7 @@ const v2SourceRoots = [
   path.join(process.cwd(), "packages", "relay-v2-orchestrator", "src"),
   path.join(process.cwd(), "packages", "relay-v2-execution", "src"),
   path.join(process.cwd(), "packages", "relay-v2-reviewer", "src"),
+  path.join(process.cwd(), "packages", "relay-v2-claude-reviewer", "src"),
   path.join(process.cwd(), "apps", "web", "app", "api", "v2"),
   path.join(process.cwd(), "apps", "web", "app", "v2"),
   path.join(process.cwd(), "apps", "web", "components", "relay-v2"),
@@ -111,7 +115,13 @@ describe("Relay v2 Milestone 2.2 execution isolation", () => {
     for (const file of files) {
       const contents = await readFile(file, "utf8");
       expect(forbiddenRuntimeReferences(contents), `${path.relative(process.cwd(), file)} contains a forbidden runtime reference`).toEqual([]);
-      expect(contents, `${path.relative(process.cwd(), file)} imports an unimplemented provider runtime`).not.toMatch(/(?:from\s+|import\s*\()\s*["'][^"']*(?:claude|gemini|deepseek|mcp)[^"']*["']/i);
+      // Milestone 2.3B implements a real Claude CLI reviewer, so "claude" is now a
+      // legitimate substring in an import specifier (the new
+      // @project-relay/relay-v2-claude-reviewer package, and this package's own
+      // relative imports like "./claude-capabilities.js"). Gemini, DeepSeek, and MCP
+      // remain fully unimplemented and stay forbidden. The Anthropic API/SDK itself
+      // is still separately forbidden above regardless of this exemption.
+      expect(contents, `${path.relative(process.cwd(), file)} imports an unimplemented provider runtime`).not.toMatch(/(?:from\s+|import\s*\()\s*["'][^"']*(?:gemini|deepseek|mcp)[^"']*["']/i);
     }
   });
 
@@ -187,10 +197,21 @@ describe("Relay v2 Milestone 2.3A reviewer isolation", () => {
     expect(fakeReviewer).not.toMatch(/node:fs|node:net|node:http|node:https|node:child_process/);
   });
 
-  it("only registers fake-reviewer in this milestone's review services wiring", async () => {
+  it("registers exactly fake-reviewer and claude-cli in this milestone's review services wiring", async () => {
     const server = await readFile(path.join(process.cwd(), "apps", "web", "lib", "relay-v2", "server.ts"), "utf8");
     expect(server).toContain("new FakeReviewer()");
-    expect(server).not.toMatch(/claude-reviewer|ClaudeReviewer|codex-reviewer|CodexReviewer/i);
+    expect(server).toMatch(/ClaudeCliReviewer/);
+    expect(server).not.toMatch(/codex-reviewer|CodexReviewer|gemini-reviewer|GeminiReviewer|deepseek-reviewer|DeepseekReviewer/i);
+  });
+
+  it("keeps the claude-cli reviewer package's dependency edges to exactly domain, execution, persistence, reviewer, local-safety, and zod", async () => {
+    const manifest = JSON.parse(await readFile(path.join(process.cwd(), "packages", "relay-v2-claude-reviewer", "package.json"), "utf8")) as PackageManifest;
+    const dependencyNames = Object.keys(manifest.dependencies ?? {});
+    expect(dependencyNames.sort()).toEqual([
+      "@project-relay/local-safety", "@project-relay/relay-v2-domain", "@project-relay/relay-v2-execution",
+      "@project-relay/relay-v2-persistence", "@project-relay/relay-v2-reviewer", "zod"
+    ].sort());
+    expect(dependencyNames).not.toEqual(expect.arrayContaining(["@project-relay/execution", "@project-relay/providers", "bullmq", "ioredis", "cross-spawn"]));
   });
 
   it("never exposes commit, push, merge, retry, or deployment controls from the review UI", async () => {

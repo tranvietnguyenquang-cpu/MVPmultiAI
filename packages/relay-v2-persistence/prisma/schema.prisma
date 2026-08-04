@@ -252,6 +252,13 @@ model ExecutionArtifact {
   sha256       String
   byteCount    Int
   truncated    Boolean  @default(false)
+  schemaVersion     String   @default("")
+  fullContentSha256 String   @default("")
+  originalByteCount Int      @default(0)
+  omittedByteCount  Int      @default(0)
+  truncationMethod  String   @default("NONE")
+  /** The producer's own versioned provenance object, carried through to the reviewer unchanged (LOG record counts, capture completeness). '{}' for artifact types that add nothing beyond the columns above. */
+  provenanceJson    String   @default("{}")
   createdAt    DateTime @default(now())
 
   @@unique([sessionId, artifactType, relativePath])
@@ -308,6 +315,9 @@ model ReviewRequest {
   requestHash              String
   reviewerConfigJson       String   @default("{}")
   reviewerConfigHash       String
+  materialBudgetPolicyVersion String @default("")
+  materialBudgetLedgerJson    String @default("{}")
+  materialBudgetLedgerHash    String @default("")
   requestedBy              String
   requestedAt              DateTime @default(now())
   ownerId                  String?
@@ -326,6 +336,7 @@ model ReviewRequest {
   updatedAt                DateTime @updatedAt
   verdicts                 ReviewVerdict[]
   events                   ReviewEvent[]
+  invocations              ReviewInvocation[]
 
   @@index([executionSessionId, createdAt])
   @@index([projectId, createdAt])
@@ -361,4 +372,86 @@ model ReviewEvent {
 
   @@unique([reviewRequestId, sequence])
   @@index([reviewRequestId, createdAt])
+}
+
+/** Reviewer-agnostic capability diagnostic history (mirrors ExecutorCapabilitySnapshot). Append-only: each refresh inserts a new row rather than updating. */
+model ReviewerCapabilitySnapshot {
+  id                   String   @id
+  reviewerId           String
+  displayPath          String
+  version              String
+  authenticationStatus String
+  supported            Boolean
+  snapshotJson         String
+  helpHash             String
+  detectedAt           DateTime
+  createdAt            DateTime @default(now())
+  invocations          ReviewInvocation[]
+
+  @@index([reviewerId, detectedAt])
+}
+
+/**
+ * Exactly zero or one row per ReviewRequest (`reviewRequestId` is UNIQUE):
+ * the one durable, ownership-guarded lifecycle record of that request's
+ * single reviewer invocation attempt (PREPARING at claim time through a
+ * terminal status), enriched in place with process/hash detail by the
+ * reviewer through ReviewControls.recordInvocation. Created atomically
+ * (ReviewEngine.createOwnedInvocationOrThrow) only after the owning
+ * ReviewRequest is proven RUNNING under the exact claiming ownership
+ * generation, and only ever updated by that same ownership generation via a
+ * CAS predicate -- a stale or superseded owner can never create or complete
+ * one. Never a second row for the same request: a ReviewRequest can be
+ * claimed at most once ever (claimNext requires PENDING and there is no path
+ * back to PENDING), so "one invocation per request" and "no automatic
+ * retry" are the same invariant. See migration.sql for the full rationale
+ * and the immutability/ownership triggers.
+ */
+model ReviewInvocation {
+  id                      String   @id
+  reviewRequestId         String   @unique
+  reviewRequest           ReviewRequest @relation(fields: [reviewRequestId], references: [id], onDelete: Cascade)
+  reviewerId              String
+  status                  String   @default("PREPARING")
+  ownerId                 String
+  claimAttempt            Int      @default(0)
+  capabilitySnapshotId    String?
+  capabilitySnapshot      ReviewerCapabilitySnapshot? @relation(fields: [capabilitySnapshotId], references: [id], onDelete: SetNull)
+  cliVersion              String   @default("")
+  executableIdentityHash  String   @default("")
+  materializerVersion     String   @default("")
+  promptPolicyVersion     String   @default("")
+  wrapperContractId       String   @default("")
+  wrapperParserVersion    String   @default("")
+  // Every identity below is computed and persisted BEFORE the reviewer process
+  // is created, never after it exits: the row states what will be sent, and
+  // finalization independently rebuilds all of it and requires an exact match.
+  materialEnvelopeVersion String   @default("")
+  materialBudgetPolicyVersion String @default("")
+  materialBudgetLedgerJson String  @default("{}")
+  reviewMaterialHash      String   @default("")
+  exactMaterialEnvelopeByteCount Int @default(0)
+  promptHash              String   @default("")
+  finalPromptByteCount    Int      @default(0)
+  materialBudgetLedgerHash String  @default("")
+  finalStdinHash          String   @default("")
+  finalStdinByteCount     Int      @default(0)
+  promptAccountingJson    String   @default("{}")
+  stdoutRedacted          String   @default("")
+  stdoutTruncated         Boolean  @default(false)
+  stderrRedacted          String   @default("")
+  stderrTruncated         Boolean  @default(false)
+  structuredOutputJson    String?
+  processId               Int?
+  processIdentity         String?
+  processStartedAt        DateTime?
+  processFinishedAt      DateTime?
+  processExitCode         Int?
+  processSignal           String?
+  timedOut                Boolean  @default(false)
+  cancelled               Boolean  @default(false)
+  createdAt               DateTime @default(now())
+  updatedAt               DateTime @updatedAt
+
+  @@index([reviewerId, createdAt])
 }

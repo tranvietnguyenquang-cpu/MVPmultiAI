@@ -12,7 +12,8 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     const reviewRequest = await engine.getReviewRequest((await params).id);
     if (!reviewRequest || reviewRequest.projectId !== projectId) throw new ReviewNotFoundError("Review request not found for this project.");
     runtime.start();
-    return NextResponse.json({ reviewRequest });
+    const latestInvocation = await engine.latestInvocation(reviewRequest.id);
+    return NextResponse.json({ reviewRequest, latestInvocation });
   } catch (error) {
     return relayV2ApiError(error, "GET /api/v2/reviews/[id]");
   }

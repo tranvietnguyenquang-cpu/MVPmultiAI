@@ -1,6 +1,6 @@
 # Relay v2 execution engine
 
-Status: **implemented and tested through Milestone 2.2**. FakeExecutor remains the deterministic diagnostic executor; `CodexCliExecutor` is the only real local CLI executor. Claude and API providers are not implemented.
+Status: **implemented and tested through Milestone 2.2**. FakeExecutor remains the deterministic diagnostic executor; `CodexCliExecutor` is the only real local CLI executor. Claude is not an executor — as of Milestone 2.3B it is a real, read-only reviewer only (see `docs/REVIEW_ENGINE.md` and `docs/CLAUDE_REVIEWER.md`). No API provider is implemented for either execution or review.
 
 ## Lifecycle
 
@@ -60,7 +60,65 @@ Output is redacted before SQLite, SSE, or artifact persistence. SQLite stores bo
 <Relay data>/artifacts/executions/<session-id>/
 ```
 
-Artifact rows contain relative path, SHA-256, byte count, and truncation status. Artifacts are app-owned and outside project workspaces. Milestone 2 performs no automatic artifact deletion.
+Artifact rows contain relative path, SHA-256, byte count, truncation status, and — since Milestone 2.3B's fifth corrective pass — truthful producer-truncation provenance (`schemaVersion`, `fullContentSha256`, `originalByteCount`, `omittedByteCount`, `truncationMethod`; see below). Artifacts are app-owned and outside project workspaces. Milestone 2 performs no automatic artifact deletion.
+
+## Canonical, versioned evidence artifacts
+
+Every evidence artifact this engine writes conforms to a strict, versioned schema shared with the reviewer (`packages/relay-v2-domain/src/evidence-artifacts.ts`, `EVIDENCE_ARTIFACT_SCHEMA_VERSION = "evidence-artifact-v1"`). `evidence-envelopes.ts` renders the engine's in-memory evidence into those envelopes, and **one in-memory value drives both the artifact bytes and the database projection** of the same evidence — so the reviewer's later canonical-equality check between the two is a real check on storage integrity rather than a comparison of two independently assembled shapes.
+
+| File | Type | Written when |
+| --- | --- | --- |
+| `final-git.json` | `FINAL_GIT` | after every codex-cli run, from the post-run capture and delta |
+| `final-patch.json` | `PATCH` (`FINAL`) | whenever anything changed, or a diff exists |
+| `baseline-patch.json` | `PATCH` (`BASELINE`) | at request time when the workspace started dirty |
+| `changed-files.json` | `CHANGED_FILES` | always, **including for a run that changed nothing** |
+| `verification-results.json` | `VERIFICATION` | when verification operations were approved |
+| `output.ndjson` | `LOG` | always |
+
+An empty change set is written as an explicit, valid, empty `CHANGED_FILES` artifact rather than by omitting the artifact: a reviewer must be able to tell *"this run touched nothing"* apart from *"nobody recorded what this run touched"*. An executor that produces no Git evidence at all (a diagnostic `FakeExecutor` session) records only the paths it **reports** touching, with null content hashes marking the claim as unproven; an AUTHORITATIVE review can never mistake that for a Git-backed change set, because it additionally requires the set to agree with the final Git evidence.
+
+## Truthful producer truncation provenance
+
+`ArtifactMetadata` now carries, alongside the `sha256`/`byteCount` of the bytes actually on disk:
+
+- `schemaVersion` — the versioned contract the content conforms to;
+- `fullContentSha256` — the hash of the **complete** content, before any truncation;
+- `originalByteCount`, `omittedByteCount`, `truncationMethod`.
+
+Every count is computed **before** the cut, from the complete content the writer held — never back-inferred from the already-shortened result, and never reported as `originalByteCount === includedByteCount, omittedByteCount === 0` when content was in fact lost.
+
+- **Structured evidence is never byte-truncated.** A truncated JSON document does not parse, so cutting it would replace usable evidence with unusable bytes while still occupying the artifact slot. Truncation that genuinely occurred is carried *inside* the envelope, on the specific field it affected.
+- **`WorkspaceEvidenceService`** measures and hashes the complete redacted diff before bounding it, and records the result in `GitEvidence.patchProvenance`. When the bounded process read had already discarded an unknown number of bytes upstream, that is reported as `captureTruncated` rather than guessed at.
+- **`VerificationCatalogRunner`** does the same per stream (`stdoutProvenance`/`stderrProvenance`), and now bounds `HEAD_AND_TAIL` rather than head-only, so a failed operation's failure-relevant tail survives truncation instead of being the first thing discarded.
+- **`ExecutionArtifactStore.appendLog`** accumulates every byte *offered* to the log — including bytes the cap refused to store — so `finalizeLog` reports the complete original size and hash rather than describing the truncated file as if it were whole.
+
+### Runner-boundary output loss is propagated, never discarded
+
+`SafeProcessRunner` counts every byte a process writes but stops **forwarding** chunks once the combined output cap is reached, reporting `outputTruncated`/`stdoutBytes`/`stderrBytes` on its exit event. A consumer that read only `exitCode` from that event — which `VerificationCatalogRunner` previously did — would persist an *empty* captured stream, `captureTruncated: false`, and status `PASSED` for an operation whose output was thrown away: an evidence record asserting that a command which printed megabytes printed nothing.
+
+Every verification result now carries the runner's own figures (`runnerOutputTruncated`, `runnerStdoutBytes`, `runnerStderrBytes`) plus per-stream `StreamCaptureProvenance` (`packages/relay-v2-domain/src/stream-capture.ts`), whose accounting closes end to end:
+
+```
+rawByteCount  −upstreamOmitted→  deliveredByteCount
+              −redactionOmitted→ capturedByteCount
+              −truncationOmitted→ includedByteCount
+```
+
+`captureCompleteness` is one of:
+
+- **`COMPLETE`** — every byte the process wrote reached this runtime, and every byte held is rendered.
+- **`TRUNCATED_KNOWN`** — this runtime held the complete stream and deliberately rendered less of it; the omitted amount and the complete content's hash are both known.
+- **`TRUNCATED_UNKNOWN`** — output was lost upstream, or an upstream loss cannot be attributed to a single stream. The complete content no longer exists anywhere, so `fullStreamContentHash` is `null` rather than fabricated from the surviving fragment.
+
+`SafeProcessRunner` now reports each chunk's original `rawByteCount`, which lets a consumer tell redaction apart from discarded output exactly; a runner that does not report it leaves the split genuinely unknowable, and that is recorded as `TRUNCATED_UNKNOWN` rather than resolved in the evidence's favour. An empty capture with nonzero raw bytes can only be `LOST_UPSTREAM` or `REDACTED_EMPTY` — never `LEGITIMATE_EMPTY`. A `PASSED` exit code never overrides any of this: the schema refuses to record "the runner discarded output" alongside two streams both claiming complete capture, and an AUTHORITATIVE review refuses `TRUNCATED_UNKNOWN` outright (see `docs/REVIEW_ENGINE.md`).
+
+### The execution LOG is record-structured, not a byte blob
+
+`appendLog` writes one **complete** NDJSON record or none at all. The byte cap used to store whatever prefix of a record happened to fit, leaving a final line that is half a JSON object — which a consumer had to either reject wholesale or, worse, embed as a transcript, showing a reviewer a fragment of an event as if it were the event. A record is now atomic: it fits and is written whole, or it is omitted whole and counted as omitted, so the file always ends on a record boundary.
+
+`finalizeLog` returns a versioned `LogProvenance` (`log-records.ts`), persisted verbatim in `ExecutionArtifact.provenanceJson` and carried unchanged to the reviewer: `originalRawByteCount`/`includedRawByteCount`/`omittedRawByteCount`, `fullRawContentHash` (the **complete** producer stream, not the capped preview), `includedContentHash`, `producerTruncated`, `truncationMethod`, `captureCompleteness`, `recordCountOriginal` (nullable — never invented), and `recordCountIncluded`.
+
+Truncation everywhere cuts only on complete Unicode code-point boundaries (`boundTextToBytes`), never an arbitrary `Buffer` slice that can split a multibyte sequence, and the inserted omission marker is counted toward the stored bytes rather than smuggled in on top of the cap.
 
 ## SSE
 
@@ -88,7 +146,7 @@ Abort observation begins before asynchronous validation and is rechecked before 
 
 The server-owned verification catalog currently supports `npm test`, `npm run typecheck`, and `npm run build` through Node plus npm's CLI entry point—never an arbitrary task-supplied shell string. Exit zero without passing the approved verification list is `FAILED`, not accepted success.
 
-## Review gate (Milestone 2.3A)
+## Review gate (Milestone 2.3A/2.3B)
 
 A `SUCCEEDED` session with its task at `AWAITING_USER_ACCEPTANCE` may request an evidence-bound review through `ReviewEngine` (see `docs/REVIEW_ENGINE.md`). A review verdict never changes `ExecutionSession` or `Task` status — it only sets a separately computed, authority-preserving `ReviewGateProjection` (never a plain status string; `commitAuthorityEligible` is always `false` in this milestone). `AWAITING_USER_ACCEPTANCE` still means what it always meant: the execution result requires later user acceptance.
 
@@ -96,4 +154,4 @@ Requesting a review never runs a reviewer inline: the API only creates a `PENDIN
 
 ## Planned
 
-Real Claude CLI review (Milestone 2.3B) and an auto-commit gate that can act on an approved review (Milestone 2.4) remain later, separately approved milestones. Automatic commit, merge, push, deployment, MCP, and API providers remain planned.
+Real Claude CLI review is implemented (Milestone 2.3B; see `docs/REVIEW_ENGINE.md` and `docs/CLAUDE_REVIEWER.md`). An auto-commit gate that can act on an approved review (Milestone 2.4) remains a later, separately approved milestone. Automatic commit, merge, push, deployment, MCP, and API providers remain planned.

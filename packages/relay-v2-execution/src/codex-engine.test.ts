@@ -1,8 +1,9 @@
+import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { parseHandoffText } from "@project-relay/relay-v2-domain";
+import { buildStreamCaptureProvenance, canonicalJson, parseHandoffText, untruncatedProvenance } from "@project-relay/relay-v2-domain";
 import { RelayV2Orchestrator } from "@project-relay/relay-v2-orchestrator";
 import { createDisposableRelayV2Database } from "@project-relay/relay-v2-persistence/testing";
 import { ExecutionArtifactStore } from "./artifacts.js";
@@ -10,6 +11,7 @@ import type { CodexCapabilitySnapshot } from "./codex-capabilities.js";
 import { CodexCliExecutor } from "./codex-cli-executor.js";
 import { ExecutionEngine } from "./engine.js";
 import { FakeExecutor } from "./fake-executor.js";
+import type { VerificationResult } from "./verification-catalog.js";
 import type { ProcessRunRequest, ProcessRunner, ProcessRunnerEvent } from "./process-runner.js";
 import type { VerificationCatalogRunner } from "./verification-catalog.js";
 import type { GitEvidence, WorkspaceEvidenceService } from "./workspace-evidence.js";
@@ -59,10 +61,33 @@ class ControlledTerminationRunner implements ProcessRunner {
   }
 }
 
+/** A stream that legitimately produced nothing: zero raw bytes, zero captured, complete capture. */
+function legitimatelyEmptyCapture(stream: "stdout" | "stderr") {
+  return buildStreamCaptureProvenance({
+    stream, rawByteCount: 0, deliveredByteCount: 0, runnerOutputTruncated: false,
+    capturedText: "", includedText: "", includedContentByteCount: 0, truncationMethod: "NONE"
+  });
+}
+
+/** A complete, schema-valid VerificationResult, so the engine's evidence writers see the same shape the real runner produces. */
+function verificationResult(overrides: Partial<VerificationResult> = {}): VerificationResult {
+  const withoutHash = {
+    operation: "NPM_TEST" as const, displayCommand: "npm test", passed: true, exitCode: 0, timedOut: false, cancelled: false,
+    summary: "npm test passed.",
+    stdoutPreview: "", stdoutTruncated: false, stdoutProvenance: untruncatedProvenance(""),
+    stderrPreview: "", stderrTruncated: false, stderrProvenance: untruncatedProvenance(""),
+    runnerOutputTruncated: false, runnerStdoutBytes: 0, runnerStderrBytes: 0,
+    stdoutCapture: legitimatelyEmptyCapture("stdout"), stderrCapture: legitimatelyEmptyCapture("stderr"),
+    startedAt: "2026-08-03T00:00:00.000Z", finishedAt: "2026-08-03T00:00:01.000Z",
+    ...overrides
+  };
+  return { ...withoutHash, resultHash: createHash("sha256").update(canonicalJson(withoutHash), "utf8").digest("hex") };
+}
+
 function evidence(workspace: string, hashCharacter: string): GitEvidence {
   return {
     repositoryRoot: workspace, branch: "relay-test", head: "1".repeat(40), dirty: false, status: [],
-    stagedCount: 0, unstagedCount: 0, untrackedCount: 0, patchPreview: "", patchSha256: "0".repeat(64),
+    stagedCount: 0, unstagedCount: 0, untrackedCount: 0, patchPreview: "", patchSha256: "0".repeat(64), patchProvenance: untruncatedProvenance(""),
     patchTruncated: false, patchOmittedForSensitivePaths: false, capturedAt: "2026-08-02T00:00:00.000Z",
     evidenceHash: hashCharacter.repeat(64)
   };
@@ -178,7 +203,7 @@ describe("ExecutionEngine Codex CLI integration boundary", () => {
 
   it("does not accept exit zero when Relay-owned verification fails", async () => {
     const runner = new CodexRunnerDouble();
-    const verificationRunner = { run: async () => [{ operation: "NPM_TEST", displayCommand: "npm test", passed: false, exitCode: 1, timedOut: false, cancelled: false, summary: "npm test failed." }] } as unknown as VerificationCatalogRunner;
+    const verificationRunner = { run: async () => [verificationResult({ passed: false, exitCode: 1, summary: "npm test failed." })] } as unknown as VerificationCatalogRunner;
     const engine = createEngine(runner, { verificationRunner });
     const queued = await engine.requestExecution(await approvedTask(["NPM_TEST"]));
     const claim = await engine.claimNext(); await engine.runClaimed(claim!.sessionId, claim!.leaseToken);

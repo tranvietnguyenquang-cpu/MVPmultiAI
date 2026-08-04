@@ -2,7 +2,7 @@ import { mkdtemp, mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { canSatisfyAuthoritativeReviewGate, canonicalJson, fakeReviewerScenarioSchema, parseHandoffText, type NormalizedTaskSpec } from "@project-relay/relay-v2-domain";
+import { canSatisfyAuthoritativeReviewGate, canonicalJson, fakeReviewerScenarioSchema, parseHandoffText, untruncatedProvenance, type NormalizedTaskSpec } from "@project-relay/relay-v2-domain";
 import { createDisposableRelayV2Database } from "@project-relay/relay-v2-persistence/testing";
 import { RelayV2Orchestrator } from "@project-relay/relay-v2-orchestrator";
 import { ExecutionArtifactStore, ExecutionEngine, FakeExecutor } from "@project-relay/relay-v2-execution";
@@ -12,12 +12,39 @@ import { ReviewAuthorityError, ReviewEngine, ReviewNotFoundError } from "./revie
 import type { ImmutableReviewCapsule, RelayReviewer, ReviewControls, ReviewerHealth, ReviewerValidationRequest, ReviewerValidationResult } from "./reviewer-contract.js";
 import { ReviewRuntimeHost } from "./runtime-host.js";
 import type { ReviewerDescriptor, StructuredReviewVerdict } from "@project-relay/relay-v2-domain";
+import { EMPTY_EXECUTION_LOG_EVIDENCE } from "./review-binding.js";
 
 /** Builds a self-referentially-consistent capsuleJson/capsuleHash pair, matching how buildExecutionCapsule embeds its own hash. */
 function selfConsistentCapsule(sessionId: string): { capsuleHash: string; capsuleJson: string } {
   const withoutHash = { sessionId };
   const capsuleHash = sha256Hex(canonicalJson(withoutHash));
   return { capsuleHash, capsuleJson: canonicalJson({ ...withoutHash, capsuleHash }) };
+}
+
+/** Builds a strictly-valid, self-consistent persisted baseline `GitEvidence` JSON string, matching WorkspaceEvidenceService.capture's shape closely enough to pass the strict evidence schema in review-binding.ts. */
+function validBaselineGitEvidenceJson(): string {
+  const withoutHash = {
+    repositoryRoot: "C:/fixture-repo", branch: "main", head: "a".repeat(40), dirty: false,
+    status: [], stagedCount: 0, unstagedCount: 0, untrackedCount: 0,
+    patchPreview: "", patchSha256: sha256Hex(""), patchTruncated: false, patchProvenance: untruncatedProvenance(""), patchOmittedForSensitivePaths: false
+  };
+  return canonicalJson({ ...withoutHash, capturedAt: "2026-08-03T00:00:00.000Z", evidenceHash: sha256Hex(canonicalJson(withoutHash)) });
+}
+
+/** Builds a strictly-valid, self-consistent persisted final `{ evidence, delta }` envelope JSON string, matching what ExecutionEngine persists into finalEvidenceJson. */
+function validFinalGitEvidenceJson(): string {
+  const withoutHash = {
+    repositoryRoot: "C:/fixture-repo", branch: "main", head: "b".repeat(40), dirty: false,
+    status: [], stagedCount: 0, unstagedCount: 0, untrackedCount: 0,
+    patchPreview: "", patchSha256: sha256Hex(""), patchTruncated: false, patchProvenance: untruncatedProvenance(""), patchOmittedForSensitivePaths: false
+  };
+  const evidence = { ...withoutHash, capturedAt: "2026-08-03T00:00:00.000Z", evidenceHash: sha256Hex(canonicalJson(withoutHash)) };
+  const delta = {
+    baselineHash: "a".repeat(64), finalHash: evidence.evidenceHash, changedFiles: [],
+    headChanged: false, branchChanged: false, preExistingChangesDestroyed: [], preExistingChangesHidden: [],
+    unaccountedPreExistingPaths: [], stashChanged: false, forbiddenGitMutationSuspected: false
+  };
+  return canonicalJson({ evidence, delta });
 }
 
 /** Delegates to a real FakeReviewer but records the exact capsule object it was handed, so tests can assert the reviewer received nothing beyond the persisted reviewInputJson. */
@@ -58,7 +85,13 @@ function buildSelfConsistentReviewRequestFixture(params: { reviewRequestId: stri
     executionStatus: "SUCCEEDED", executionResultStatus: "succeeded", executionSummary: "ok", executionSummaryHash: sha256Hex("ok"),
     executionCapsuleHash: sha256Hex("{}"), executionCapsuleJsonHash: sha256Hex("{}"),
     baselineGitEvidenceHash: "a".repeat(64), finalGitEvidenceHash: "a".repeat(64), verificationResultsHash: "a".repeat(64), executionArtifactSetHash: "a".repeat(64),
-    finalBranch: "main", finalHead: "deadbeef", requestedAt: requestedAt.toISOString(), reviewPolicyVersion: "2.3A-v1"
+    finalBranch: "main", finalHead: "deadbeef", requestedAt: requestedAt.toISOString(), reviewPolicyVersion: "2.3A-v1",
+    taskConstraints: [], acceptanceCriteria: [],
+    approvedExecutorSelection: "FAKE", approvedModel: "AUTO", approvedEffort: "AUTO", approvedVerificationOperations: [],
+    baselineGitEvidence: { available: false, branch: "", head: "", dirty: false, changedFiles: [], diffPreview: "", diffTruncated: false, diffOmittedForSensitivePaths: false },
+    finalGitEvidence: { available: false, branch: "", head: "", dirty: false, changedFiles: [], diffPreview: "", diffTruncated: false, diffOmittedForSensitivePaths: false },
+    verificationEvidence: [], executionArtifactManifest: [],
+    executionLogEvidence: EMPTY_EXECUTION_LOG_EVIDENCE
   });
   const reviewInputJson = canonicalJson(capsule);
   const reviewInputHash = computeReviewInputHash(capsule);
@@ -208,14 +241,14 @@ describe("Relay v2 review engine", () => {
 
     it("rejects missing final Git evidence for a codex-marked session", async () => {
       const { sessionId } = await succeededSession();
-      await database.client.executionSession.update({ where: { id: sessionId }, data: { executorId: "codex-cli", capsuleHash: "a".repeat(64), baselineEvidenceJson: JSON.stringify({ dummy: true }) } });
+      await database.client.executionSession.update({ where: { id: sessionId }, data: { executorId: "codex-cli", capsuleHash: "a".repeat(64), baselineEvidenceJson: validBaselineGitEvidenceJson() } });
       await expect(reviewEngine.requestReview(sessionId, projectId, "fake-reviewer", "tester")).rejects.toThrow(/final git evidence/i);
     });
 
     it("rejects missing verification results when verification operations were required", async () => {
       const { sessionId } = await succeededSession();
       await database.client.executionSession.update({ where: { id: sessionId }, data: {
-        executorId: "codex-cli", capsuleHash: "a".repeat(64), baselineEvidenceJson: JSON.stringify({ dummy: true }), finalEvidenceJson: JSON.stringify({ evidence: { branch: "main", head: "abc" } }),
+        executorId: "codex-cli", capsuleHash: "a".repeat(64), baselineEvidenceJson: validBaselineGitEvidenceJson(), finalEvidenceJson: validFinalGitEvidenceJson(),
         approvedVerificationJson: JSON.stringify(["NPM_TEST"])
       } });
       await expect(reviewEngine.requestReview(sessionId, projectId, "fake-reviewer", "tester")).rejects.toThrow(/verification/i);
@@ -226,9 +259,32 @@ describe("Relay v2 review engine", () => {
       const capsuleHash = "a".repeat(64);
       await database.client.executionSession.update({ where: { id: sessionId }, data: {
         executorId: "codex-cli", capsuleHash, capsuleJson: JSON.stringify({ sessionId, capsuleHash: "b".repeat(64) }),
-        baselineEvidenceJson: JSON.stringify({ dummy: true }), finalEvidenceJson: JSON.stringify({ evidence: { branch: "main", head: "abc" } })
+        baselineEvidenceJson: validBaselineGitEvidenceJson(), finalEvidenceJson: validFinalGitEvidenceJson()
       } });
       await expect(reviewEngine.requestReview(sessionId, projectId, "fake-reviewer", "tester")).rejects.toThrow(/capsule failed integrity/i);
+    });
+
+    it("hard-rejects malformed (valid-JSON-wrong-shape) non-empty baseline Git evidence, never silently treating it as unavailable", async () => {
+      // Genuinely non-parseable JSON can never reach here in the first place
+      // (the column itself has a `CHECK (json_valid(...))` constraint, see
+      // migration.sql) -- so the reachable malformed case through Prisma is
+      // syntactically-valid-but-wrong-shape JSON (a bare scalar here), which
+      // json_valid() does not and cannot catch.
+      const { sessionId } = await succeededSession();
+      await database.client.executionSession.update({ where: { id: sessionId }, data: { baselineEvidenceJson: "42" } });
+      await expect(reviewEngine.requestReview(sessionId, projectId, "fake-reviewer", "tester", { diagnostic: true })).rejects.toThrow(/Git evidence is not a JSON object/i);
+    });
+
+    it("hard-rejects malformed (wrong-shape) non-empty final Git evidence", async () => {
+      const { sessionId } = await succeededSession();
+      await database.client.executionSession.update({ where: { id: sessionId }, data: { finalEvidenceJson: "[]" } });
+      await expect(reviewEngine.requestReview(sessionId, projectId, "fake-reviewer", "tester", { diagnostic: true })).rejects.toThrow(/Git evidence is not a JSON object/i);
+    });
+
+    it("hard-rejects malformed (valid-JSON-wrong-shape) non-empty verification-results JSON, never silently treating it as zero results", async () => {
+      const { sessionId } = await succeededSession();
+      await database.client.executionSession.update({ where: { id: sessionId }, data: { verificationResultsJson: "{}" } });
+      await expect(reviewEngine.requestReview(sessionId, projectId, "fake-reviewer", "tester", { diagnostic: true })).rejects.toThrow(/Verification results are not a JSON array/i);
     });
 
     it("returns not-found for a wrong project", async () => {
@@ -256,7 +312,7 @@ describe("Relay v2 review engine", () => {
       const { sessionId } = await succeededSession();
       const capsule = selfConsistentCapsule(sessionId);
       await database.client.executionSession.update({ where: { id: sessionId }, data: {
-        executorId: "codex-cli", ...capsule, baselineEvidenceJson: JSON.stringify({ dummy: true }), finalEvidenceJson: JSON.stringify({ evidence: { branch: "main", head: "abc" } })
+        executorId: "codex-cli", ...capsule, baselineEvidenceJson: validBaselineGitEvidenceJson(), finalEvidenceJson: validFinalGitEvidenceJson()
       } });
       const normalRuntimeEngine = new ReviewEngine(database.client, new FakeReviewer(), { allowFakeExecutorDiagnosticReviews: true, allowCodexTestDoubleDiagnosticReviews: false });
       await expect(normalRuntimeEngine.requestReview(sessionId, projectId, "fake-reviewer", "tester", { diagnostic: true })).rejects.toThrow(/disposable test-double diagnostic gate/i);
@@ -266,7 +322,7 @@ describe("Relay v2 review engine", () => {
       const { sessionId } = await succeededSession();
       const capsule = selfConsistentCapsule(sessionId);
       await database.client.executionSession.update({ where: { id: sessionId }, data: {
-        executorId: "codex-cli", ...capsule, baselineEvidenceJson: JSON.stringify({ dummy: true }), finalEvidenceJson: JSON.stringify({ evidence: { branch: "main", head: "abc" } })
+        executorId: "codex-cli", ...capsule, baselineEvidenceJson: validBaselineGitEvidenceJson(), finalEvidenceJson: validFinalGitEvidenceJson()
       } });
       const result = await reviewEngine.requestReview(sessionId, projectId, "fake-reviewer", "tester", { diagnostic: true, reviewerConfig: { outcome: "approve" } });
       expect(result.reviewRequest.reviewAuthority).toBe("DIAGNOSTIC");
@@ -279,7 +335,7 @@ describe("Relay v2 review engine", () => {
       const { sessionId } = await succeededSession();
       const capsule = selfConsistentCapsule(sessionId);
       await database.client.executionSession.update({ where: { id: sessionId }, data: {
-        executorId: "codex-cli", ...capsule, baselineEvidenceJson: JSON.stringify({ dummy: true }), finalEvidenceJson: JSON.stringify({ evidence: { branch: "main", head: "abc" } })
+        executorId: "codex-cli", ...capsule, baselineEvidenceJson: validBaselineGitEvidenceJson(), finalEvidenceJson: validFinalGitEvidenceJson()
       } });
       await expect(reviewEngine.requestReview(sessionId, projectId, "fake-reviewer", "tester", {})).rejects.toThrow(/disposable test-double diagnostic gate/i);
     });
@@ -333,6 +389,17 @@ describe("Relay v2 review engine", () => {
       await claim!.done;
       const terminal = await reviewEngine.getReviewRequest(result.reviewRequest.id);
       expect(terminal!.status).toBe("STALE");
+    });
+
+    it("invalidates (never approves) the review when Git evidence becomes malformed (valid-JSON-wrong-shape) non-empty JSON after the request but before the verdict is accepted", async () => {
+      const { sessionId } = await succeededSession();
+      const result = await reviewEngine.requestReview(sessionId, projectId, "fake-reviewer", "tester", { diagnostic: true, reviewerConfig: { outcome: "approve", delayMs: 30 } });
+      const claim = await claimAndRunInBackground();
+      await database.client.executionSession.update({ where: { id: sessionId }, data: { finalEvidenceJson: "42" } });
+      await claim!.done;
+      const terminal = await reviewEngine.getReviewRequest(result.reviewRequest.id);
+      expect(terminal!.status).toBe("STALE");
+      expect(terminal!.verdicts).toHaveLength(0);
     });
 
     it("invalidates the review when the execution capsule changes before the verdict is accepted", async () => {
@@ -460,10 +527,12 @@ describe("Relay v2 review engine", () => {
       const row = await database.client.reviewRequest.findUniqueOrThrow({ where: { id: result.reviewRequest.id } });
       expect(capturing.lastCapsule).toBeDefined();
       const persisted = JSON.parse(row.reviewInputJson) as Record<string, unknown>;
-      const { requestHash, scenario, ...receivedInput } = capturing.lastCapsule!;
+      const { requestHash, reviewInputHash, reviewerConfigHash, scenario, ...receivedInput } = capturing.lastCapsule!;
       void scenario;
       expect(receivedInput).toEqual(persisted);
       expect(requestHash).toBe(row.requestHash);
+      expect(reviewInputHash).toBe(row.reviewInputHash);
+      expect(reviewerConfigHash).toBe(row.reviewerConfigHash);
     });
   });
 

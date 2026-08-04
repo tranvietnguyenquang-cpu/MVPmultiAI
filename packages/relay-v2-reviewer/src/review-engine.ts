@@ -1,20 +1,26 @@
 import { randomUUID } from "node:crypto";
 import { redactSecrets } from "@project-relay/local-safety";
 import {
+  MATERIAL_BUDGET_POLICY_VERSION,
   REVIEW_POLICY_VERSION,
   assertReviewTransition,
   canonicalJson,
+  claudeReviewerConfigSchema,
   fakeReviewerScenarioSchema,
   isTerminalReviewStatus,
   reviewAuthoritySchema,
+  reviewerCapabilityDiagnosticSchema,
+  reviewerInvocationRecordSchema,
   reviewRequestStatusSchema,
   reviewerSelectionSchema,
   structuredReviewVerdictSchema,
   type ReviewAuthority,
+  type ReviewerCapabilityDiagnostic,
   type ReviewEventLevel,
   type ReviewEventType,
   type ReviewGateProjection,
   type ReviewGateState,
+  type ReviewerInvocationRecord,
   type ReviewRequestStatus,
   type StructuredReviewVerdict
 } from "@project-relay/relay-v2-domain";
@@ -22,18 +28,38 @@ import { Prisma, type RelayV2Database } from "@project-relay/relay-v2-persistenc
 import { z } from "zod";
 import { SystemReviewClock, type ReviewClock } from "./clock.js";
 import {
+  assertAuthoritativeLogProvenance,
+  assertProducerTruncationPolicy,
+  checkConditionalEvidenceRequirements,
+  LOG_PROVENANCE_ARTIFACT_MISMATCH,
+  REQUIRED_ARTIFACT_TYPES_FOR_AUTHORITATIVE_REVIEW,
+  validateRequiredArtifacts,
+  type ValidatedLogEvidencePart,
+  type ValidatedReviewEvidencePart
+} from "./artifact-evidence.js";
+import {
+  checkArtifactDatabaseEquality,
+  checkAuthoritativeMaterialPolicy,
+  checkGitEvidenceIntegrity,
+  checkVerificationCaptureCompleteness,
+  checkVerificationEvidenceIntegrity,
   computeCanonicalTaskSpecHash,
   computeRequestHash,
   computeReviewInputHash,
   computeTaskNormalizedSpecHash,
   reviewInputCapsuleSchema,
   sha256Hex,
+  summarizeBaselineGitEvidence,
+  summarizeExecutionLogEvidence,
+  summarizeFinalGitEvidence,
+  summarizeVerificationEvidence,
   verifyCapsuleIntegrity,
   verifyJsonHashBinding,
   type ReviewInputCapsule
 } from "./review-binding.js";
+import { compareInvocationIdentity, prepareReviewInvocation, preparedInvocationIdentity } from "./prepared-invocation.js";
 import { resolveReviewerAuthority } from "./reviewer-authority.js";
-import type { ImmutableReviewCapsule, RelayReviewer } from "./reviewer-contract.js";
+import type { ImmutableReviewCapsule, PreparedReviewInvocation, RelayReviewer } from "./reviewer-contract.js";
 import { ReviewerRegistry } from "./reviewer-registry.js";
 
 /**
@@ -44,7 +70,8 @@ import { ReviewerRegistry } from "./reviewer-registry.js";
  * must deliberately register its own schema before it can accept any config.
  */
 const REVIEWER_CONFIG_SCHEMA_BY_ID: Record<string, z.ZodTypeAny> = {
-  "fake-reviewer": fakeReviewerScenarioSchema
+  "fake-reviewer": fakeReviewerScenarioSchema,
+  "claude-cli": claudeReviewerConfigSchema
 };
 function reviewerConfigSchemaFor(reviewerId: string): z.ZodTypeAny {
   return REVIEWER_CONFIG_SCHEMA_BY_ID[reviewerId] ?? z.object({}).strict();
@@ -69,7 +96,7 @@ const sessionInclude = {
 
 type SessionWithReviewContext = Prisma.ExecutionSessionGetPayload<{ include: typeof sessionInclude }>;
 type ApprovalRow = SessionWithReviewContext["task"]["approvals"][number];
-type ArtifactRow = { artifactType: string; relativePath: string; sha256: string; byteCount: number; truncated: boolean };
+type ArtifactRow = { id: string; sessionId: string; artifactType: string; relativePath: string; sha256: string; byteCount: number; truncated: boolean };
 type ReviewRequestRow = Prisma.ReviewRequestGetPayload<Record<string, never>>;
 
 export type ReviewRequestDetails = Prisma.ReviewRequestGetPayload<{ include: typeof reviewInclude }>;
@@ -91,6 +118,17 @@ export type ReviewEngineOptions = {
    * runtime, and never AUTHORITATIVE even when on.
    */
   allowCodexTestDoubleDiagnosticReviews?: boolean;
+  /**
+   * Canonical, application-owned execution-artifact storage root (mirrors
+   * ExecutionArtifactStore.artifactsRoot). When set, every codex-cli
+   * session's recorded ExecutionArtifact rows are byte-validated against the
+   * real files on disk (ownership, path containment, hash, size) before a
+   * review may proceed, and every artifact type
+   * REQUIRED_ARTIFACT_TYPES_FOR_AUTHORITATIVE_REVIEW expects is required to
+   * be present. Left unset only by tests that fabricate database rows
+   * without real artifact files; production always sets this.
+   */
+  artifactsRoot?: string;
 };
 
 export type RequestReviewOptions = {
@@ -102,6 +140,34 @@ export type RequestReviewResult = { reviewRequest: ReviewRequestDetails; duplica
 
 /** The ownership generation a runtime host proved when it claimed a review. Every terminal write must re-prove this exact generation still holds. */
 type ClaimOwnership = { ownerId: string; leaseToken: string; claimAttempt: number };
+
+/** Terminal (and PREPARING) invocation lifecycle states; see ReviewInvocation's migration comment for the full rationale. */
+type InvocationStatus = "PREPARING" | "RUNNING" | "SUCCEEDED" | "FAILED" | "TIMED_OUT" | "CANCELLED" | "OWNERSHIP_LOST" | "INTERRUPTED_UNCERTAIN";
+
+/** Thrown by createOwnedInvocationOrThrow when the claiming ownership generation no longer holds; the caller must never invoke the reviewer in this case. */
+class InvocationOwnershipLostError extends Error {}
+
+/**
+ * Why an authoritative reconstruction refused, and therefore how it is
+ * persisted. The split is deliberate and load-bearing:
+ *   - EVIDENCE_CHANGED is STALE: the world moved, which is not an error;
+ *   - everything else is ERROR: a configuration/IO failure, or a persisted
+ *     authority state that is malformed or impossible, neither of which may
+ *     be filed away as ordinary drift.
+ * Neither ever triggers an automatic rerun.
+ */
+type AuthoritativeFailureCode =
+  | "EVIDENCE_CHANGED"
+  | "REVIEW_IMMUTABLE_INPUT_MISMATCH"
+  | "ARTIFACT_STORE_UNAVAILABLE"
+  | "ARTIFACT_STORE_READ_FAILURE"
+  /** The artifact row and the producer's LOG provenance are each valid but describe different streams -- never STALE: nothing changed, the two accounts simply contradict each other. */
+  | typeof LOG_PROVENANCE_ARTIFACT_MISMATCH
+  | "INVOCATION_BINDING_MISMATCH"
+  | "REVIEWER_ECHO_MISMATCH";
+
+/** The codes that describe the world changing, rather than something being wrong: these become STALE, everything else ERROR. */
+const STALE_FAILURE_CODES: ReadonlySet<AuthoritativeFailureCode> = Object.freeze(new Set<AuthoritativeFailureCode>(["EVIDENCE_CHANGED"]));
 
 function isUniqueFailure(error: unknown): boolean {
   return error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002";
@@ -149,6 +215,7 @@ export class ReviewEngine {
   private readonly leaseMs: number;
   private readonly allowFakeExecutorDiagnosticReviews: boolean;
   private readonly allowCodexTestDoubleDiagnosticReviews: boolean;
+  private readonly artifactsRoot: string | undefined;
   private readonly controllers = new Map<string, AbortController>();
 
   constructor(
@@ -162,6 +229,7 @@ export class ReviewEngine {
     this.leaseMs = options.leaseMs ?? 15_000;
     this.allowFakeExecutorDiagnosticReviews = options.allowFakeExecutorDiagnosticReviews ?? false;
     this.allowCodexTestDoubleDiagnosticReviews = options.allowCodexTestDoubleDiagnosticReviews ?? false;
+    this.artifactsRoot = options.artifactsRoot;
   }
 
   private boundedPayload(payload: unknown): string {
@@ -183,10 +251,22 @@ export class ReviewEngine {
   }
 
   /** Session-level eligibility only. Reviewer-authority matching is a separate, independently re-run decision (see resolveReviewerAuthority). */
-  private checkEligibility(session: SessionWithReviewContext): { reason: string } | null {
+  private async checkEligibility(session: SessionWithReviewContext): Promise<{ reason: string } | null> {
     if (session.status !== "SUCCEEDED") return { reason: `Execution session status is ${session.status}; only a succeeded execution can be reviewed.` };
     if (session.task.status !== "AWAITING_USER_ACCEPTANCE") return { reason: `Task status is ${session.task.status}; the execution has not reached AWAITING_USER_ACCEPTANCE.` };
     if (session.leases.some(lease => !lease.releasedAt)) return { reason: "The workspace lease for this execution has not been released." };
+    // Malformed non-empty persisted evidence must never be silently absorbed
+    // into an "unavailable"/empty summary further down this pipeline
+    // (summarizeBaselineGitEvidence/summarizeFinalGitEvidence/
+    // summarizeVerificationEvidence all degrade a parse/shape failure that
+    // way) -- it is a hard eligibility failure here, before any capsule is
+    // ever built, for every executor and every review authority.
+    const baselineIntegrity = checkGitEvidenceIntegrity(session.baselineEvidenceJson, "Baseline", "baseline");
+    if (!baselineIntegrity.ok) return { reason: baselineIntegrity.reason };
+    const finalIntegrity = checkGitEvidenceIntegrity(session.finalEvidenceJson, "Final", "final");
+    if (!finalIntegrity.ok) return { reason: finalIntegrity.reason };
+    const verificationIntegrity = checkVerificationEvidenceIntegrity(session.verificationResultsJson);
+    if (!verificationIntegrity.ok) return { reason: verificationIntegrity.reason };
     if (session.executorId === "codex-cli") {
       if (!session.capsuleHash) return { reason: "Execution capsule is missing." };
       if (session.baselineEvidenceJson === "{}") return { reason: "Baseline Git evidence is missing." };
@@ -197,6 +277,72 @@ export class ReviewEngine {
     if (!session.artifacts.length) return { reason: "No execution artifacts have been recorded." };
     if (!verifyCapsuleIntegrity(session.capsuleJson, session.capsuleHash)) return { reason: "The execution capsule failed integrity verification." };
     return null;
+  }
+
+  /**
+   * The AUTHORITATIVE-only artifact-store gate (Milestone 2.3B fourth
+   * corrective pass): an AUTHORITATIVE review can never proceed without a
+   * configured, readable, byte-validated artifact store -- absence or a read
+   * failure both block before the reviewer is ever invoked, and are reported
+   * distinctly from ordinary evidence drift (the caller maps this to ERROR,
+   * never STALE/EVIDENCE_CHANGED, and never silently skips validation the way
+   * the old bare `if (this.artifactsRoot)` gate did). A DIAGNOSTIC review has
+   * no such requirement and always succeeds trivially with no log content.
+   * Never reads the live project or Relay workspace as a fallback -- only the
+   * application-owned artifact store this engine was configured with.
+   */
+  private async validateAuthoritativeArtifactEvidence(
+    session: SessionWithReviewContext, authorityMode: ReviewAuthority
+  ): Promise<
+    | { ok: true; log: ValidatedLogEvidencePart | null; parts: ValidatedReviewEvidencePart[] }
+    | { ok: false; reason: string; code: "ARTIFACT_STORE_UNAVAILABLE" | "ARTIFACT_STORE_READ_FAILURE" | typeof LOG_PROVENANCE_ARTIFACT_MISMATCH }
+  > {
+    if (authorityMode !== "AUTHORITATIVE") return { ok: true, log: null, parts: [] };
+    if (!this.artifactsRoot) {
+      return { ok: false, code: "ARTIFACT_STORE_UNAVAILABLE", reason: "This runtime has no execution-artifact storage root configured; an AUTHORITATIVE review requires byte-validated artifact evidence and cannot proceed." };
+    }
+    // VERIFICATION is only ever written when verification operations were
+    // actually approved for this task (see ExecutionEngine.runClaimed) --
+    // requiring it unconditionally would wrongly block every codex-cli
+    // session approved with zero verification operations.
+    const verificationOperations = JSON.parse(session.approvedVerificationJson) as unknown[];
+    const requiredTypes = REQUIRED_ARTIFACT_TYPES_FOR_AUTHORITATIVE_REVIEW.filter(type => type !== "VERIFICATION" || verificationOperations.length > 0);
+    const artifactCheck = await validateRequiredArtifacts(this.artifactsRoot, session.id, session.artifacts, requiredTypes);
+    // A row/provenance contradiction is reported under its own code rather
+    // than as an ordinary read failure: nothing is unreadable or missing, two
+    // valid records of the same log simply disagree.
+    if (!artifactCheck.ok) return { ok: false, code: artifactCheck.code ?? "ARTIFACT_STORE_READ_FAILURE", reason: artifactCheck.reason };
+
+    // The artifact bytes are the authoritative source. Everything below runs
+    // against the parsed, byte-validated parts -- never against the database
+    // projection on its own.
+    const truncationPolicy = assertProducerTruncationPolicy(artifactCheck.parts);
+    if (!truncationPolicy.ok) return { ok: false, code: "ARTIFACT_STORE_READ_FAILURE", reason: truncationPolicy.reason };
+    // The producer's LOG provenance is required, and required to describe the
+    // real bytes, at EVERY point this runs: request eligibility, pre-spawn
+    // reconstruction, and finalization. A missing, empty, unknown-completeness,
+    // or self-contradicting provenance blocks here -- before a ReviewRequest
+    // exists, before any ReviewInvocation is created, and before any Claude
+    // process is started.
+    const logProvenance = assertAuthoritativeLogProvenance(artifactCheck.log);
+    if (!logProvenance.ok) {
+      return { ok: false, code: "code" in logProvenance ? logProvenance.code : "ARTIFACT_STORE_READ_FAILURE", reason: logProvenance.reason };
+    }
+    const conditional = checkConditionalEvidenceRequirements(artifactCheck.parts);
+    if (!conditional.ok) return { ok: false, code: "ARTIFACT_STORE_READ_FAILURE", reason: conditional.reason };
+    // The one cryptographic equality edge: the database JSON that will be
+    // rendered must reduce, through the same canonical semantics, to exactly
+    // what the validated artifact bytes say. Divergence in EITHER store is a
+    // hard block before any reviewer is invoked.
+    const equality = checkArtifactDatabaseEquality(artifactCheck.parts, session.baselineEvidenceJson, session.finalEvidenceJson, session.verificationResultsJson);
+    if (!equality.ok) return { ok: false, code: "ARTIFACT_STORE_READ_FAILURE", reason: equality.reason };
+
+    return { ok: true, log: artifactCheck.log, parts: artifactCheck.parts };
+  }
+
+  /** The reviewer's own policy header, charged to the REVIEWER_POLICY_PROMPT budget category rather than counted as zero. */
+  private policyPromptFor(reviewerId: string): string {
+    return this.reviewers.get(reviewerId)?.materialPolicyPrompt?.() ?? "";
   }
 
   /** Independently re-derives the specHash embedded in the approval snapshot and requires it to match the frozen taskSpecHash column — never trusts approvedSpecHash in isolation. */
@@ -213,12 +359,56 @@ export class ReviewEngine {
    * either outside a transaction (request time) or inside one (revalidation),
    * so this never itself decides what "current" means.
    */
+  /** Throwing wrapper for the request-time paths, where a capsule that cannot be built is a hard authority failure. */
+  private buildReviewInputCapsuleOrThrow(
+    reviewRequestId: string, requestedAt: Date, session: SessionWithReviewContext, projectId: string,
+    reviewerId: string, approval: ApprovalRow, reviewAuthority: ReviewAuthority, diagnostic: boolean,
+    executionLog: ValidatedLogEvidencePart | null
+  ): ReviewInputCapsule {
+    const result = this.buildReviewInputCapsule(reviewRequestId, requestedAt, session, projectId, reviewerId, approval, reviewAuthority, diagnostic, executionLog);
+    if (!result.ok) throw new ReviewAuthorityError(result.reason);
+    return result.capsule;
+  }
+
   private buildReviewInputCapsule(
     reviewRequestId: string, requestedAt: Date, session: SessionWithReviewContext, projectId: string,
-    reviewerId: string, approval: ApprovalRow, reviewAuthority: ReviewAuthority, diagnostic: boolean
-  ): ReviewInputCapsule {
+    reviewerId: string, approval: ApprovalRow, reviewAuthority: ReviewAuthority, diagnostic: boolean,
+    executionLog: ValidatedLogEvidencePart | null
+  ): { ok: true; capsule: ReviewInputCapsule } | { ok: false; reason: string } {
     const { branch, head } = finalBranchHead(session.finalEvidenceJson);
-    return reviewInputCapsuleSchema.parse({
+    let normalizedSpec: { constraints: string[]; acceptanceCriteria: string[] };
+    try {
+      const parsed = JSON.parse(session.task.normalizedSpecJson) as { constraints?: unknown; acceptanceCriteria?: unknown };
+      normalizedSpec = {
+        constraints: Array.isArray(parsed.constraints) ? parsed.constraints.filter((value): value is string => typeof value === "string") : [],
+        acceptanceCriteria: Array.isArray(parsed.acceptanceCriteria) ? parsed.acceptanceCriteria.filter((value): value is string => typeof value === "string") : []
+      };
+    } catch {
+      normalizedSpec = { constraints: [], acceptanceCriteria: [] };
+    }
+    let approvedVerificationOperations: unknown[] = [];
+    try {
+      const parsedOps: unknown = JSON.parse(session.approvedVerificationJson);
+      if (Array.isArray(parsedOps)) approvedVerificationOperations = parsedOps;
+    } catch { /* left empty */ }
+    // Rendered from the ONE validated LOG evidence object -- bytes, records,
+    // and the producer's own provenance together. Nothing here reads the
+    // artifact row's `truncated` column or any other partial substitute for
+    // that provenance. Strict UTF-8 decoding and record validation can
+    // legitimately fail (binary or corrupted bytes); that is reported, never
+    // absorbed into an empty transcript that would read as "this run produced
+    // no output".
+    const executionLogEvidence = summarizeExecutionLogEvidence(executionLog);
+    if (!executionLogEvidence.ok) return { ok: false, reason: executionLogEvidence.reason };
+    // Last gate before the capsule becomes the authoritative binding: an
+    // AUTHORITATIVE capsule may never be built around a log whose producer
+    // provenance is absent. validateAuthoritativeArtifactEvidence already
+    // refused this case; proving it again here means no future caller can
+    // assemble an authoritative capsule that quietly lost it.
+    if (reviewAuthority === "AUTHORITATIVE" && executionLogEvidence.evidence.producerProvenance === null) {
+      return { ok: false, reason: "The execution log evidence bound into this AUTHORITATIVE review carries no producer provenance; the review cannot proceed." };
+    }
+    const capsule = reviewInputCapsuleSchema.parse({
       reviewRequestId, executionSessionId: session.id, projectId, taskId: session.taskId, reviewerId, reviewAuthority, diagnostic,
       approvalId: approval.id, approvalStatus: approval.status,
       approvedReviewer: reviewerSelectionSchema.parse(approval.reviewer),
@@ -239,14 +429,273 @@ export class ReviewEngine {
       verificationResultsHash: sha256Hex(session.verificationResultsJson),
       executionArtifactSetHash: artifactSetHash(session.artifacts),
       finalBranch: branch, finalHead: head,
-      requestedAt: requestedAt.toISOString(), reviewPolicyVersion: REVIEW_POLICY_VERSION
+      requestedAt: requestedAt.toISOString(), reviewPolicyVersion: REVIEW_POLICY_VERSION,
+      taskConstraints: normalizedSpec.constraints,
+      acceptanceCriteria: normalizedSpec.acceptanceCriteria,
+      approvedExecutorSelection: session.approvedExecutor,
+      approvedModel: session.approvedModel,
+      approvedEffort: session.approvedEffort,
+      approvedVerificationOperations,
+      baselineGitEvidence: summarizeBaselineGitEvidence(session.baselineEvidenceJson),
+      finalGitEvidence: summarizeFinalGitEvidence(session.finalEvidenceJson),
+      verificationEvidence: summarizeVerificationEvidence(session.verificationResultsJson),
+      executionArtifactManifest: session.artifacts.map(artifact => ({
+        artifactId: artifact.id, artifactType: artifact.artifactType, relativePath: artifact.relativePath,
+        sha256: artifact.sha256, byteCount: artifact.byteCount, truncated: artifact.truncated
+      })),
+      executionLogEvidence: executionLogEvidence.evidence
+    });
+    return { ok: true, capsule };
+  }
+
+  /**
+   * Atomically creates the single ReviewInvocation row for this request
+   * (schema-enforced UNIQUE on reviewRequestId), durably coupling it to the
+   * exact ownership/lease/claim generation that is about to invoke the
+   * reviewer -- one transaction, re-proving the full ownership predicate
+   * (mirrors ownershipWhere) AND requiring no invocation already exists,
+   * both inside the same transaction as the insert. If either predicate
+   * fails, no row is inserted, and the caller (runClaimed) must never call
+   * reviewer.review(): a stale or superseded owner, or a request that
+   * (should never happen, but is checked regardless) already has an
+   * invocation, can never start a second Claude/reviewer process.
+   */
+  private async createOwnedInvocationOrThrow(
+    reviewRequestId: string, reviewerId: string, ownership: ClaimOwnership,
+    prepared: PreparedReviewInvocation | null, capabilitySnapshotId: string | null,
+    wrapperContract: { contractId: string; parserVersion: string } | null
+  ): Promise<string> {
+    return this.database.$transaction(async tx => {
+      const now = this.clock.now();
+      const current = await tx.reviewRequest.findUnique({ where: { id: reviewRequestId } });
+      if (!current || current.status !== "RUNNING" || current.ownerId !== ownership.ownerId || current.leaseToken !== ownership.leaseToken || current.claimAttempts !== ownership.claimAttempt || !current.leaseExpiresAt || current.leaseExpiresAt <= now) {
+        throw new InvocationOwnershipLostError("Review lease ownership was lost before the invocation could be created.");
+      }
+      const existing = await tx.reviewInvocation.findUnique({ where: { reviewRequestId } });
+      if (existing) throw new Error("A ReviewInvocation already exists for this review request; a second invocation attempt is not permitted.");
+      const id = randomUUID();
+      const createdAt = now;
+      // Bound only when the referenced snapshot actually exists: a capability
+      // snapshot id that no row matches is a dangling reference, and inserting
+      // it would fail the foreign key and lose the whole invocation rather
+      // than simply recording that no snapshot was resolvable.
+      const boundSnapshotId = capabilitySnapshotId
+        && await tx.reviewerCapabilitySnapshot.findUnique({ where: { id: capabilitySnapshotId }, select: { id: true } })
+        ? capabilitySnapshotId
+        : null;
+      await tx.reviewInvocation.create({ data: {
+        id, reviewRequestId, reviewerId, status: "PREPARING",
+        ownerId: ownership.ownerId, claimAttempt: ownership.claimAttempt, createdAt, updatedAt: createdAt,
+        // The complete transmitted identity, committed HERE -- before the
+        // process exists, not patched in after it exits. A row that has not
+        // reached this point describes nothing, and a verdict can only ever be
+        // accepted against an identity that was durable before the reviewer
+        // was given anything to read.
+        ...(prepared ? {
+          capabilitySnapshotId: boundSnapshotId,
+          wrapperContractId: wrapperContract?.contractId ?? "",
+          wrapperParserVersion: wrapperContract?.parserVersion ?? "",
+          materialEnvelopeVersion: prepared.materialEnvelopeVersion,
+          materialBudgetPolicyVersion: prepared.materialBudgetPolicyVersion,
+          materialBudgetLedgerJson: prepared.ledgerJson,
+          materialBudgetLedgerHash: prepared.ledgerHash,
+          reviewMaterialHash: prepared.materialHash,
+          exactMaterialEnvelopeByteCount: prepared.materialByteCount,
+          promptPolicyVersion: prepared.promptPolicyVersion,
+          promptHash: prepared.promptHash,
+          finalPromptByteCount: prepared.finalPromptByteCount,
+          finalStdinHash: prepared.finalStdinHash,
+          finalStdinByteCount: prepared.finalStdinByteCount,
+          promptAccountingJson: canonicalJson(prepared.promptAccounting)
+        } : {})
+      } });
+      return id;
     });
   }
 
-  private async auditRejected(session: SessionWithReviewContext, projectId: string, actor: string, reason: string) {
+  /** Ownership-scoped CAS predicate shared by every non-transition-specific ReviewInvocation write: only the still-live owning generation that created the row may update it, and only while it is still PREPARING or RUNNING (never overwriting an already-terminal row). RUNNING is included because markInvocationRunning may already have transitioned the row by the time the reviewer reports its final detail/terminal status. */
+  private invocationOwnershipWhere(reviewRequestId: string, ownership: ClaimOwnership) {
+    return { reviewRequestId, ownerId: ownership.ownerId, claimAttempt: ownership.claimAttempt, status: { in: ["PREPARING", "RUNNING"] } };
+  }
+
+  /**
+   * CAS-transitions the single ReviewInvocation row from PREPARING to RUNNING
+   * the instant the reviewer's owned process actually starts, persisting the
+   * exact process identity durably. Requires, in one transaction: the
+   * invocation id, reviewRequestId, ownerId, and claimAttempt to all still
+   * match the invocation row (still PREPARING), AND the owning ReviewRequest
+   * to still be RUNNING under this exact ownerId/leaseToken/claimAttempts
+   * generation with an unexpired lease. Returns false (never throws) if any
+   * of that no longer holds -- the caller (ClaudeCliReviewer, via
+   * ReviewControls.markInvocationRunning) must then treat this exactly like
+   * a lost heartbeat: stop treating the invocation as authoritative and let
+   * the aborted signal terminate the owned process.
+   */
+  private async markInvocationRunning(reviewRequestId: string, invocationId: string, ownership: ClaimOwnership, processInfo: { pid: number; processIdentity: string; startedAt: string }): Promise<boolean> {
+    return this.database.$transaction(async tx => {
+      const now = this.clock.now();
+      const request = await tx.reviewRequest.findUnique({ where: { id: reviewRequestId } });
+      if (!request || request.status !== "RUNNING" || request.ownerId !== ownership.ownerId || request.leaseToken !== ownership.leaseToken || request.claimAttempts !== ownership.claimAttempt || !request.leaseExpiresAt || request.leaseExpiresAt <= now) {
+        return false;
+      }
+      const updated = await tx.reviewInvocation.updateMany({
+        where: { id: invocationId, reviewRequestId, ownerId: ownership.ownerId, claimAttempt: ownership.claimAttempt, status: "PREPARING" },
+        data: { status: "RUNNING", processId: processInfo.pid, processIdentity: processInfo.processIdentity, processStartedAt: new Date(processInfo.startedAt) }
+      });
+      return updated.count === 1;
+    });
+  }
+
+  /**
+   * CAS-updates the single ReviewInvocation row to a terminal status, but
+   * only if it is still PREPARING under the exact ownership generation that
+   * created it -- if the reviewer itself already updated the row to a
+   * terminal status via recordInvocation (as ClaudeCliReviewer always does
+   * before throwing or returning), this matches zero rows and is a no-op; it
+   * exists to guarantee every invocation attempt ends in a terminal status
+   * even for a reviewer that never calls recordInvocation at all (e.g.
+   * FakeReviewer) or that fails before ever reaching that call (e.g. a
+   * pre-spawn capability/identity mismatch). Never creates a row: if none
+   * exists (createOwnedInvocationOrThrow never succeeded), this is a no-op.
+   */
+  private async finalizeInvocationStatus(reviewRequestId: string, ownership: ClaimOwnership, status: Exclude<InvocationStatus, "PREPARING" | "RUNNING">): Promise<void> {
+    await this.database.reviewInvocation.updateMany({
+      where: this.invocationOwnershipWhere(reviewRequestId, ownership),
+      data: { status }
+    });
+  }
+
+  private deriveInvocationStatusFromRecord(record: ReviewerInvocationRecord): Exclude<InvocationStatus, "PREPARING" | "RUNNING" | "OWNERSHIP_LOST" | "INTERRUPTED_UNCERTAIN"> {
+    if (record.cancelled) return "CANCELLED";
+    if (record.timedOut) return "TIMED_OUT";
+    if (record.structuredOutputJson && record.processExitCode === 0) return "SUCCEEDED";
+    return "FAILED";
+  }
+
+  /**
+   * CAS-updates the single ReviewInvocation row in place with one
+   * reviewer-reported invocation detail report, redacted and bounded, only if
+   * it is still PREPARING under the exact ownership generation that created
+   * it. Never invented by ReviewEngine itself — only ever what the reviewer
+   * explicitly reported via `ReviewControls.recordInvocation`. Its `status`
+   * is derived deterministically from the record's own
+   * cancelled/timedOut/exitCode/output fields (never a separate claim), so
+   * `finalizeInvocationStatus` sees the row already terminal and skips its
+   * own fallback update. If ownership was lost (0 rows matched), this is a
+   * silent no-op here -- the ReviewRequest-level CAS elsewhere is what
+   * ultimately reports ownership loss for the request as a whole.
+   */
+  private async persistReviewerInvocation(reviewRequestId: string, ownership: ClaimOwnership, record: ReviewerInvocationRecord): Promise<void> {
+    const parsed = reviewerInvocationRecordSchema.parse(record);
+    // The transmitted identity is WRITE-ONCE, bound before the process
+    // started, so this report can only ever add process detail to it -- never
+    // restate it. A reviewer that reports different identities than it was
+    // given is an integrity violation, not a correction to apply: it is
+    // refused here, and the review ends without a verdict.
+    const bound = await this.database.reviewInvocation.findUnique({ where: { reviewRequestId } });
+    if (bound?.reviewMaterialHash) {
+      const mismatched = (
+        bound.reviewMaterialHash !== parsed.reviewMaterialHash ? "reviewMaterialHash"
+          : bound.promptHash !== parsed.promptHash ? "promptHash"
+            : bound.materialBudgetLedgerHash !== parsed.materialBudgetLedgerHash ? "materialBudgetLedgerHash"
+              : bound.finalStdinHash !== parsed.finalStdinHash ? "finalStdinHash" : null
+      );
+      if (mismatched) {
+        throw new Error(`The reviewer reported a ${mismatched} that differs from the one durably bound to this invocation before its process started; the result cannot be trusted.`);
+      }
+    }
+    await this.database.reviewInvocation.updateMany({
+      where: this.invocationOwnershipWhere(reviewRequestId, ownership),
+      data: {
+        status: this.deriveInvocationStatusFromRecord(parsed),
+        cliVersion: parsed.cliVersion, executableIdentityHash: parsed.executableIdentityHash,
+        materializerVersion: parsed.materializerVersion,
+        stdoutRedacted: redactSecrets(parsed.stdoutRedacted), stdoutTruncated: parsed.stdoutTruncated,
+        stderrRedacted: redactSecrets(parsed.stderrRedacted), stderrTruncated: parsed.stderrTruncated,
+        structuredOutputJson: parsed.structuredOutputJson,
+        processId: parsed.processId, processIdentity: parsed.processIdentity,
+        processStartedAt: parsed.processStartedAt ? new Date(parsed.processStartedAt) : null,
+        processFinishedAt: parsed.processFinishedAt ? new Date(parsed.processFinishedAt) : null,
+        processExitCode: parsed.processExitCode, processSignal: parsed.processSignal,
+        timedOut: parsed.timedOut, cancelled: parsed.cancelled
+      }
+    });
+  }
+
+  /**
+   * True if the (at most one, per the schema's UNIQUE constraint) invocation
+   * for any (non-cancelled) ReviewRequest belonging to this execution session
+   * is still non-terminal or ended INTERRUPTED_UNCERTAIN -- i.e. a prior
+   * Claude (or other real-CLI) process's termination was never proven. While
+   * quarantined, a new AUTHORITATIVE-capable review request for this session
+   * is refused entirely (see requestReview) rather than risking a second
+   * concurrent process against the same evidence.
+   */
+  private async hasUnresolvedInvocation(executionSessionId: string): Promise<boolean> {
+    const requests = await this.database.reviewRequest.findMany({ where: { executionSessionId }, select: { id: true } });
+    if (!requests.length) return false;
+    const unresolved = await this.database.reviewInvocation.findFirst({
+      where: { reviewRequestId: { in: requests.map(request => request.id) }, status: { in: ["PREPARING", "RUNNING", "INTERRUPTED_UNCERTAIN"] } },
+      select: { id: true }
+    });
+    return unresolved !== null;
+  }
+
+  /**
+   * Mirrors ExecutionEngine.refreshExecutorCapabilities: if the registered
+   * reviewer supports capability re-discovery, run it and persist a new,
+   * append-only ReviewerCapabilitySnapshot row. ReviewEngine never knows how
+   * discovery works (no process-spawning code here) — it only persists and
+   * re-serves whatever the reviewer reports.
+   */
+  async refreshReviewerCapabilities(reviewerId: string): Promise<{ descriptor: ReturnType<RelayReviewer["describe"]>; health: Awaited<ReturnType<RelayReviewer["health"]>>; snapshot: ReviewerCapabilityDiagnostic | null; snapshotId: string | null }> {
+    const reviewer = this.reviewers.require(reviewerId);
+    if (!reviewer.refreshCapabilities) return { descriptor: reviewer.describe(), health: await reviewer.health(), snapshot: null, snapshotId: null };
+    const diagnostic = reviewerCapabilityDiagnosticSchema.parse(await reviewer.refreshCapabilities());
+    const snapshotId = randomUUID();
+    await this.database.reviewerCapabilitySnapshot.create({ data: {
+      id: snapshotId, reviewerId, displayPath: diagnostic.displayPath, version: diagnostic.version,
+      authenticationStatus: diagnostic.authenticationStatus, supported: diagnostic.supported,
+      snapshotJson: this.boundedPayload(diagnostic), helpHash: diagnostic.helpHash || sha256Hex(""), detectedAt: new Date(diagnostic.detectedAt)
+    } });
+    return { descriptor: reviewer.describe(), health: await reviewer.health(), snapshot: diagnostic, snapshotId };
+  }
+
+  /** Latest persisted capability snapshot for a reviewer, or null if none has ever been recorded. Purely informational: never itself the authorization gate for a real review (the reviewer re-verifies live at review time). */
+  async latestReviewerCapability(reviewerId: string): Promise<ReviewerCapabilityDiagnostic | null> {
+    return (await this.latestReviewerCapabilityRecord(reviewerId))?.diagnostic ?? null;
+  }
+
+  /** Row id of the latest persisted capability snapshot for a reviewer, or null. Kept only for existing callers that need the id alone; prefer latestReviewerCapabilityRecord when both id and diagnostic are needed together (see its docstring for why). */
+  async latestReviewerCapabilitySnapshotId(reviewerId: string): Promise<string | null> {
+    return (await this.latestReviewerCapabilityRecord(reviewerId))?.id ?? null;
+  }
+
+  /**
+   * Atomically reads the id and diagnostic content of the latest persisted
+   * capability snapshot from a single row in one query. Milestone 2.3B's
+   * original implementation called latestReviewerCapability (one query) and
+   * latestReviewerCapabilitySnapshotId (a second, separate query) back to
+   * back; a capability refresh racing between those two queries could pair
+   * an id from one snapshot with diagnostic content from a different one,
+   * and buildClaudeReviewerConfig would then bind a request to a
+   * capabilitySnapshotId whose actual stored content never matched what was
+   * used to build the config. This method is the only correct way to obtain
+   * both together.
+   */
+  async latestReviewerCapabilityRecord(reviewerId: string): Promise<{ id: string; diagnostic: ReviewerCapabilityDiagnostic } | null> {
+    const stored = await this.database.reviewerCapabilitySnapshot.findFirst({ where: { reviewerId }, orderBy: { detectedAt: "desc" } });
+    if (!stored) return null;
+    const parsed = reviewerCapabilityDiagnosticSchema.safeParse(JSON.parse(stored.snapshotJson));
+    return parsed.success ? { id: stored.id, diagnostic: parsed.data } : null;
+  }
+
+  /** `failureCode` is recorded when the refusal has a specific one, so an audit trail says WHICH invariant refused, not merely that something did. The reason is bounded and carries no artifact path or log content. */
+  private async auditRejected(session: SessionWithReviewContext, projectId: string, actor: string, reason: string, failureCode?: AuthoritativeFailureCode) {
     await this.database.auditEvent.create({ data: {
       id: randomUUID(), projectId, taskId: session.taskId, executionSessionId: session.id, actor,
-      action: "REVIEW_REQUEST_REJECTED", riskLevel: "REVIEW", detailsJson: this.boundedPayload({ reason })
+      action: "REVIEW_REQUEST_REJECTED", riskLevel: "REVIEW",
+      detailsJson: this.boundedPayload(failureCode ? { reason, failureCode } : { reason })
     } });
   }
 
@@ -260,7 +709,17 @@ export class ReviewEngine {
     const activeExisting = await this.database.reviewRequest.findFirst({ where: { executionSessionId, status: { in: [...ACTIVE_REVIEW_STATUSES] } }, include: reviewInclude });
     if (activeExisting) return { reviewRequest: activeExisting, duplicate: true };
 
-    const eligibilityFailure = this.checkEligibility(session);
+    // A prior real-CLI reviewer invocation whose process termination was
+    // never proven (runtime restart, or a heartbeat/lease loss the process
+    // may not have actually honored) must never be joined by a second
+    // concurrent invocation against the same evidence. FakeReviewer never
+    // spawns a process, so it is exempt from this quarantine.
+    if (reviewer.id !== "fake-reviewer" && (await this.hasUnresolvedInvocation(executionSessionId))) {
+      await this.auditRejected(session, projectId, actor, "A prior reviewer invocation for this execution session has not been proven to have terminated; a new authoritative review cannot start until that is resolved.");
+      throw new ReviewAuthorityError("This execution session is quarantined: a prior reviewer invocation's termination could not be proven.");
+    }
+
+    const eligibilityFailure = await this.checkEligibility(session);
     if (eligibilityFailure) {
       await this.auditRejected(session, projectId, actor, eligibilityFailure.reason);
       throw new ReviewAuthorityError(eligibilityFailure.reason);
@@ -294,8 +753,34 @@ export class ReviewEngine {
       throw new ReviewAuthorityError(authority.reason);
     }
 
+    // AUTHORITATIVE-only artifact-store gate (Milestone 2.3B fourth
+    // corrective pass): absence or a read failure both block here, before any
+    // ReviewRequest row is created and long before the reviewer is ever
+    // invoked. A DIAGNOSTIC review is unaffected.
+    const artifactEvidence = await this.validateAuthoritativeArtifactEvidence(session, authority.mode);
+    if (!artifactEvidence.ok) {
+      await this.auditRejected(session, projectId, actor, artifactEvidence.reason, artifactEvidence.code);
+      throw new ReviewAuthorityError(artifactEvidence.reason);
+    }
+
     const reviewRequestId = randomUUID();
     const requestedAt = this.clock.now();
+
+    // Evidence-content safety (lost verification output, unsafe truncation,
+    // redaction collapse) depends only on the capsule and is checked here,
+    // where a failure can be audited as a rejected request. The exact material
+    // envelope cannot be built yet: it embeds `reviewedRequestHash`, and
+    // requestHash binds an attempt number that is only known atomically inside
+    // the transaction below.
+    if (authority.mode === "AUTHORITATIVE") {
+      const previewCapsule = this.buildReviewInputCapsuleOrThrow(reviewRequestId, requestedAt, session, projectId, reviewerId, approval, authority.mode, diagnosticRequested, artifactEvidence.log);
+      const captureCheck = checkVerificationCaptureCompleteness(previewCapsule.verificationEvidence);
+      if (!captureCheck.ok) {
+        await this.auditRejected(session, projectId, actor, captureCheck.reason);
+        throw new ReviewAuthorityError(captureCheck.reason);
+      }
+    }
+
     // The reviewer's own configuration is authority-affecting input (for
     // FakeReviewer it directly determines approve/reject/needs_changes/
     // failure/delay/cancellation outcomes), so it is validated with the
@@ -311,12 +796,27 @@ export class ReviewEngine {
         if (raced) return { duplicateId: raced.id } as const;
         const priorAttempts = await tx.reviewRequest.count({ where: { executionSessionId } });
         // Attempt numbering is only known atomically inside this transaction, and requestHash binds it — so the capsule/hash must be built here, not before.
-        const capsule = this.buildReviewInputCapsule(reviewRequestId, requestedAt, session, projectId, reviewerId, approval, authority.mode, diagnosticRequested);
+        const capsule = this.buildReviewInputCapsuleOrThrow(reviewRequestId, requestedAt, session, projectId, reviewerId, approval, authority.mode, diagnosticRequested, artifactEvidence.log);
         const reviewInputHash = computeReviewInputHash(capsule);
         const requestHash = computeRequestHash({
           reviewInputHash, reviewerConfigHash, reviewerId, reviewAuthority: authority.mode,
           requestedBy: actor, attempt: priorAttempts, reviewPolicyVersion: capsule.reviewPolicyVersion
         });
+        // The exact material envelope this request authorizes, measured now
+        // that its own identity is known. The ledger is bound into the row, so
+        // the budget a review was authorized under can never be reinterpreted
+        // afterwards -- and finalization rebuilds it from current evidence and
+        // requires the same result.
+        let materialBudgetLedgerJson = "{}";
+        let materialBudgetLedgerHash = "";
+        let materialBudgetPolicyVersion = "";
+        if (authority.mode === "AUTHORITATIVE") {
+          const materialPolicy = checkAuthoritativeMaterialPolicy(capsule, this.policyPromptFor(reviewerId), requestHash);
+          if (!materialPolicy.ok) throw new ReviewAuthorityError(materialPolicy.reason);
+          materialBudgetLedgerJson = canonicalJson(materialPolicy.ledger);
+          materialBudgetLedgerHash = materialPolicy.ledgerHash;
+          materialBudgetPolicyVersion = MATERIAL_BUDGET_POLICY_VERSION;
+        }
         const row = await tx.reviewRequest.create({ data: {
           id: reviewRequestId, executionSessionId, projectId, taskId: session.taskId, reviewerId,
           reviewAuthority: authority.mode, diagnosticRequested,
@@ -330,7 +830,9 @@ export class ReviewEngine {
           executionArtifactSetHash: capsule.executionArtifactSetHash, executionResultStatus: capsule.executionResultStatus,
           finalBranch: capsule.finalBranch, finalHead: capsule.finalHead, reviewPolicyVersion: capsule.reviewPolicyVersion,
           reviewInputJson: canonicalJson(capsule), reviewInputHash, requestHash,
-          reviewerConfigJson, reviewerConfigHash, requestedBy: actor, requestedAt
+          reviewerConfigJson, reviewerConfigHash,
+          materialBudgetPolicyVersion, materialBudgetLedgerJson, materialBudgetLedgerHash,
+          requestedBy: actor, requestedAt
         } });
         await this.appendEventTx(tx, row.id, "REVIEW_REQUESTED", "INFO", `Review requested from ${reviewer.describe().displayName}.`, { requestHash, reviewInputHash, reviewerId, reviewAuthority: authority.mode });
         await tx.auditEvent.create({ data: {
@@ -352,6 +854,14 @@ export class ReviewEngine {
       // restarted runtime can never strand or silently drop the review.
       return { reviewRequest, duplicate: false };
     } catch (error) {
+      // A material-policy failure raised inside the transaction still gets the
+      // same audited rejection as one caught before it, so which side of the
+      // transaction boundary a check happens to live on never changes whether
+      // the refusal is recorded.
+      if (error instanceof ReviewAuthorityError) {
+        await this.auditRejected(session, projectId, actor, error.message);
+        throw error;
+      }
       if (!isUniqueFailure(error)) throw error;
       const raced = await this.database.reviewRequest.findFirst({ where: { executionSessionId, status: { in: [...ACTIVE_REVIEW_STATUSES] } } });
       if (!raced) throw error;
@@ -482,6 +992,75 @@ export class ReviewEngine {
   }
 
   /**
+   * Rebuilds the COMPLETE authoritative binding from current source-of-truth
+   * rows and current artifact bytes: the capsule, its input hash, this
+   * request's identity, the material envelope, its exact ledger, and the
+   * reviewer's exact prompt and stdin.
+   *
+   * Used in both places that must agree: before the process is created (where
+   * the result is what gets persisted and sent) and again at finalization
+   * (where the result is compared against what was persisted). One
+   * implementation, so "the reconstruction matches" cannot degrade into "two
+   * separately written code paths happen to agree today".
+   */
+  private async reconstructAuthoritativeBinding(
+    row: ReviewRequestRow, reviewer: RelayReviewer, tx?: Prisma.TransactionClient
+  ): Promise<
+    | { ok: true; prepared: PreparedReviewInvocation; capsule: ReviewInputCapsule }
+    | { ok: false; reason: string; code: AuthoritativeFailureCode }
+  > {
+    const client = tx ?? this.database;
+    const session = await client.executionSession.findUnique({ where: { id: row.executionSessionId }, include: sessionInclude });
+    if (!session || session.projectId !== row.projectId) {
+      return { ok: false, code: "EVIDENCE_CHANGED", reason: "The execution session or its project ownership changed after the review was requested." };
+    }
+    const approval = session.task.approvals.find(item => item.id === row.approvalId);
+    if (!approval) return { ok: false, code: "EVIDENCE_CHANGED", reason: "The task approval used for this execution no longer exists." };
+
+    // Current artifact bytes, re-read and re-validated, with artifact/database
+    // semantic equality re-proved -- never the bytes validated at request time.
+    const artifactEvidence = await this.validateAuthoritativeArtifactEvidence(session, "AUTHORITATIVE");
+    if (!artifactEvidence.ok) return { ok: false, code: artifactEvidence.code, reason: artifactEvidence.reason };
+
+    const capsuleResult = this.buildReviewInputCapsule(
+      row.id, row.requestedAt, session, row.projectId, row.reviewerId, approval,
+      reviewAuthoritySchema.parse(row.reviewAuthority), row.diagnosticRequested, artifactEvidence.log
+    );
+    if (!capsuleResult.ok) return { ok: false, code: "EVIDENCE_CHANGED", reason: capsuleResult.reason };
+
+    // The identity of the evidence as it stands NOW must reproduce the
+    // identity this request was created with. Evidence that changed
+    // coherently -- artifact bytes and database projection both rewritten to a
+    // valid new state -- differs here even though every internal consistency
+    // check still passes.
+    const reviewInputHash = computeReviewInputHash(capsuleResult.capsule);
+    const requestHash = computeRequestHash({
+      reviewInputHash, reviewerConfigHash: row.reviewerConfigHash, reviewerId: row.reviewerId,
+      reviewAuthority: reviewAuthoritySchema.parse(row.reviewAuthority), requestedBy: row.requestedBy,
+      attempt: row.attempt, reviewPolicyVersion: row.reviewPolicyVersion
+    });
+    if (requestHash !== row.requestHash) {
+      return { ok: false, code: "EVIDENCE_CHANGED", reason: "The review requestHash no longer matches a freshly reconstructed input capsule; the evidence changed after this review was requested." };
+    }
+    if (row.materialBudgetPolicyVersion !== MATERIAL_BUDGET_POLICY_VERSION) {
+      return { ok: false, code: "EVIDENCE_CHANGED", reason: `This review was authorized under material budget policy '${row.materialBudgetPolicyVersion}', but this build enforces '${MATERIAL_BUDGET_POLICY_VERSION}'; it cannot proceed under a different policy.` };
+    }
+
+    const configCheck = verifyJsonHashBinding(reviewerConfigSchemaFor(row.reviewerId), row.reviewerConfigJson, row.reviewerConfigHash);
+    if (!configCheck.ok) return { ok: false, code: "REVIEW_IMMUTABLE_INPUT_MISMATCH", reason: "reviewerConfigJson failed schema validation or no longer matches its recorded reviewerConfigHash." };
+
+    const preparation = prepareReviewInvocation({
+      capsule: capsuleResult.capsule, requestHash, reviewInputHash,
+      reviewerConfigHash: row.reviewerConfigHash, reviewer, reviewerConfig: configCheck.value
+    });
+    if (!preparation.ok) return { ok: false, code: "EVIDENCE_CHANGED", reason: preparation.reason };
+    if (row.materialBudgetLedgerHash && row.materialBudgetLedgerHash !== preparation.prepared.ledgerHash) {
+      return { ok: false, code: "EVIDENCE_CHANGED", reason: "The reconstructed material byte ledger no longer matches the ledger this review request was bound to." };
+    }
+    return { ok: true, prepared: preparation.prepared, capsule: capsuleResult.capsule };
+  }
+
+  /**
    * Immediately before accepting any verdict: first re-verifies the immutable
    * input binding itself (reviewInputJson/reviewerConfigJson/requestHash,
    * exactly as verifyImmutableInputBinding does before the reviewer runs —
@@ -496,7 +1075,9 @@ export class ReviewEngine {
    * capsule integrity — is reported as a STALE reason/code instead of a
    * boolean, so the event/audit trail records exactly what changed.
    */
-  private async revalidateForVerdict(tx: Prisma.TransactionClient, row: ReviewRequestRow): Promise<{ ok: true } | { ok: false; reason: string; code: "REVIEW_IMMUTABLE_INPUT_MISMATCH" | "EVIDENCE_CHANGED" }> {
+  private async revalidateForVerdict(
+    tx: Prisma.TransactionClient, row: ReviewRequestRow, verdict: StructuredReviewVerdict
+  ): Promise<{ ok: true } | { ok: false; reason: string; code: AuthoritativeFailureCode }> {
     const bindingCheck = this.verifyImmutableInputBinding(row);
     if (!bindingCheck.ok) return { ok: false, reason: bindingCheck.reason, code: "REVIEW_IMMUTABLE_INPUT_MISMATCH" };
 
@@ -504,7 +1085,7 @@ export class ReviewEngine {
     if (!session || session.projectId !== row.projectId) return { ok: false, code: "EVIDENCE_CHANGED", reason: "The execution session or its project ownership changed after the review was requested." };
     if (session.task.specHash !== session.approvedSpecHash) return { ok: false, code: "EVIDENCE_CHANGED", reason: "The task specification changed after this execution completed." };
 
-    const eligibilityFailure = this.checkEligibility(session);
+    const eligibilityFailure = await this.checkEligibility(session);
     if (eligibilityFailure) return { ok: false, code: "EVIDENCE_CHANGED", reason: eligibilityFailure.reason };
 
     const approval = session.task.approvals.find(item => item.id === row.approvalId);
@@ -527,13 +1108,50 @@ export class ReviewEngine {
     if (!authority.authorized) return { ok: false, code: "EVIDENCE_CHANGED", reason: authority.reason };
     if (authority.mode !== row.reviewAuthority) return { ok: false, code: "EVIDENCE_CHANGED", reason: "The review authority mode changed after the review was requested." };
 
-    const currentCapsule = this.buildReviewInputCapsule(row.id, row.requestedAt, session, row.projectId, row.reviewerId, approval, authority.mode, row.diagnosticRequested);
+    // AUTHORITATIVE-only artifact-store gate, re-checked live: reported under
+    // its own specific code (ARTIFACT_STORE_UNAVAILABLE, ARTIFACT_STORE_READ_FAILURE,
+    // or LOG_PROVENANCE_ARTIFACT_MISMATCH), all of which finalizeAcceptedVerdict
+    // maps to ERROR, never STALE, rather than folded into ordinary evidence drift.
+    const artifactEvidence = await this.validateAuthoritativeArtifactEvidence(session, authority.mode);
+    if (!artifactEvidence.ok) return { ok: false, code: artifactEvidence.code, reason: artifactEvidence.reason };
+
+    const capsuleResult = this.buildReviewInputCapsule(row.id, row.requestedAt, session, row.projectId, row.reviewerId, approval, authority.mode, row.diagnosticRequested, artifactEvidence.log);
+    if (!capsuleResult.ok) return { ok: false, code: "EVIDENCE_CHANGED", reason: capsuleResult.reason };
+    const currentCapsule = capsuleResult.capsule;
     const currentRequestHash = computeRequestHash({
       reviewInputHash: computeReviewInputHash(currentCapsule), reviewerConfigHash: row.reviewerConfigHash,
       reviewerId: row.reviewerId, reviewAuthority: authority.mode, requestedBy: row.requestedBy, attempt: row.attempt, reviewPolicyVersion: row.reviewPolicyVersion
     });
     if (currentRequestHash !== row.requestHash) {
       return { ok: false, code: "EVIDENCE_CHANGED", reason: "The review requestHash no longer matches a freshly reconstructed input capsule." };
+    }
+    if (authority.mode === "AUTHORITATIVE") {
+      // ENGINE-OWNED finalization reconstruction. Nothing here relies on a
+      // check the reviewer already performed: the reviewer is the party whose
+      // output is being judged, so its own account of what it was sent has no
+      // authority. Everything is rebuilt independently -- the capsule, the
+      // material envelope, the exact ledger, the exact prompt and stdin -- and
+      // each identity must equal the one the PREPARING row committed to before
+      // the process started.
+      const reviewer = this.reviewers.get(row.reviewerId);
+      if (!reviewer) return { ok: false, code: "INVOCATION_BINDING_MISMATCH", reason: "The reviewer that produced this result is no longer registered, so its transmitted material cannot be independently reconstructed." };
+      const reconstruction = await this.reconstructAuthoritativeBinding(row, reviewer, tx);
+      if (!reconstruction.ok) return { ok: false, code: reconstruction.code, reason: reconstruction.reason };
+
+      const invocation = await tx.reviewInvocation.findUnique({ where: { reviewRequestId: row.id } });
+      if (!invocation) return { ok: false, code: "INVOCATION_BINDING_MISMATCH", reason: "No reviewer invocation exists for this review, so its verdict cannot be tied to any transmitted material." };
+      const identity = compareInvocationIdentity(preparedInvocationIdentity(reconstruction.prepared), invocation);
+      if (!identity.ok) return { ok: false, code: "INVOCATION_BINDING_MISMATCH", reason: identity.reason };
+
+      // What the reviewer echoed must match the independent reconstruction,
+      // not merely whatever it was handed: a reviewer that echoes its own
+      // input back proves only that it can copy.
+      if (verdict.reviewedMaterialHash !== undefined && verdict.reviewedMaterialHash !== reconstruction.prepared.materialHash) {
+        return { ok: false, code: "REVIEWER_ECHO_MISMATCH", reason: "The reviewer echoed a review-material hash that does not match the independently reconstructed material." };
+      }
+      if (verdict.reviewedPromptHash !== undefined && verdict.reviewedPromptHash !== reconstruction.prepared.promptHash) {
+        return { ok: false, code: "REVIEWER_ECHO_MISMATCH", reason: "The reviewer echoed a prompt hash that does not match the independently reconstructed prompt." };
+      }
     }
     return { ok: true };
   }
@@ -553,21 +1171,36 @@ export class ReviewEngine {
         return "ownership-lost" as const;
       }
 
-      const revalidation = await this.revalidateForVerdict(tx, row);
+      const revalidation = await this.revalidateForVerdict(tx, row, verdict);
       await this.appendEventTx(tx, reviewRequestId, "REVIEW_EVIDENCE_RECHECKED", "INFO", "Revalidated authority and evidence bindings before accepting the verdict.");
 
       if (!revalidation.ok) {
-        const staled = await tx.reviewRequest.updateMany({
+        // Only genuine evidence drift is STALE. An artifact-store
+        // availability/read failure, a corrupted immutable binding, an
+        // invocation whose committed identity does not match the independent
+        // reconstruction, and a reviewer echoing the wrong hashes are all
+        // ERROR (no invalidatedAt, matching every other ERROR path here):
+        // they describe an impossible or malformed authority state, not a
+        // world that legitimately moved on. No path here reruns the reviewer.
+        const isEvidenceDrift = STALE_FAILURE_CODES.has(revalidation.code);
+        const isArtifactStoreFailure = !isEvidenceDrift;
+        const targetStatus = isEvidenceDrift ? "STALE" : "ERROR";
+        const updated = await tx.reviewRequest.updateMany({
           where: this.ownershipWhere(reviewRequestId, ownership, "RUNNING", now),
-          data: { status: "STALE", finishedAt: now, invalidatedAt: now, failureCode: revalidation.code, failureMessage: redactSecrets(revalidation.reason).slice(0, 2_000), ...RELEASED_LEASE_FIELDS }
+          data: {
+            status: targetStatus, finishedAt: now, ...(isEvidenceDrift ? { invalidatedAt: now } : {}),
+            failureCode: revalidation.code, failureMessage: redactSecrets(revalidation.reason).slice(0, 2_000), ...RELEASED_LEASE_FIELDS
+          }
         });
-        if (!staled.count) return "ownership-lost" as const;
-        await this.appendEventTx(tx, reviewRequestId, "REVIEW_STALE_INVALIDATED", "WARNING", revalidation.reason);
-        await tx.auditEvent.create({ data: {
-          id: randomUUID(), projectId: row.projectId, taskId: row.taskId, executionSessionId: row.executionSessionId, actor: "review-engine",
-          action: "REVIEW_STALE_INVALIDATED", riskLevel: "REVIEW", detailsJson: this.boundedPayload({ reviewRequestId, reason: revalidation.reason })
-        } });
-        return "stale" as const;
+        if (!updated.count) return "ownership-lost" as const;
+        await this.appendEventTx(tx, reviewRequestId, isArtifactStoreFailure ? "REVIEW_ERROR" : "REVIEW_STALE_INVALIDATED", isArtifactStoreFailure ? "ERROR" : "WARNING", revalidation.reason);
+        if (!isArtifactStoreFailure) {
+          await tx.auditEvent.create({ data: {
+            id: randomUUID(), projectId: row.projectId, taskId: row.taskId, executionSessionId: row.executionSessionId, actor: "review-engine",
+            action: "REVIEW_STALE_INVALIDATED", riskLevel: "REVIEW", detailsJson: this.boundedPayload({ reviewRequestId, reason: revalidation.reason })
+          } });
+        }
+        return isArtifactStoreFailure ? "error" as const : "stale" as const;
       }
 
       const updated = await tx.reviewRequest.updateMany({
@@ -603,7 +1236,45 @@ export class ReviewEngine {
     const reviewer = this.reviewers.get(claimedRow.reviewerId);
     const controller = new AbortController();
     this.controllers.set(reviewRequestId, controller);
-    const heartbeatTimer = setInterval(() => void this.heartbeat(reviewRequestId, leaseToken), Math.max(25, Math.floor(this.leaseMs / 3)));
+    // Heartbeat loss must actually stop the owned process, not merely go
+    // unnoticed: when a heartbeat fails (lease expired or reclaimed by
+    // another owner), this aborts the same AbortSignal the reviewer's own
+    // process-running boundary observes, which terminates the owned
+    // process and only then lets reviewer.review() return/throw --
+    // "waiting for actual process exit" falls out of that existing
+    // async-generator plumbing, not a separate wait here.
+    let ownershipLost = false;
+    // Single guarded entry point for every way heartbeat can signal ownership
+    // loss (a clean `false` return, or the heartbeat call itself throwing --
+    // e.g. a transient database error). Idempotent: only the first call
+    // aborts the controller, so a throwing heartbeat that keeps firing on
+    // every subsequent tick can never re-abort or double-count. Aborting the
+    // same AbortSignal the reviewer's process-running boundary observes is
+    // what actually terminates the owned process; reviewer.review() then
+    // returns/throws once that process exits, which the `finally` below
+    // already waits on before finalizing the invocation.
+    const handleHeartbeatOwnershipLoss = (reason: string): void => {
+      if (ownershipLost) return;
+      ownershipLost = true;
+      controller.abort(new Error(reason));
+    };
+    const heartbeatTimer = setInterval(() => {
+      void (async () => {
+        try {
+          const ok = await this.heartbeat(reviewRequestId, leaseToken);
+          if (!ok) handleHeartbeatOwnershipLoss("Review lease ownership was lost (heartbeat failed); aborting the active reviewer process.");
+        } catch (error) {
+          // A thrown heartbeat is exactly as much an ownership-loss signal as
+          // a clean `false`: the lease's true state is now unknown, so the
+          // owned process must still be aborted rather than left running
+          // unsupervised. Never rethrown -- this runs inside a detached timer
+          // callback, so an unhandled rejection here would crash the runtime.
+          handleHeartbeatOwnershipLoss(`Review lease heartbeat failed with an error (treated as ownership loss): ${redactSecrets(error instanceof Error ? error.message : String(error))}`);
+        }
+      })();
+    }, Math.max(25, Math.floor(this.leaseMs / 3)));
+    let invocationId: string | undefined;
+    let invocationOutcome: Exclude<InvocationStatus, "PREPARING" | "RUNNING"> = "FAILED";
     try {
       if (!reviewer) {
         await this.finalizeNonVerdict(reviewRequestId, ownership, "CLAIMED", "ERROR", "The registered reviewer disappeared before the review could run.", "REVIEWER_MISSING", null);
@@ -635,6 +1306,36 @@ export class ReviewEngine {
         return;
       }
 
+      // AUTHORITATIVE-only artifact-store gate, live, immediately before the
+      // reviewer is invoked (Milestone 2.3B fourth corrective pass): this is
+      // what makes "block before Claude process spawn" true even for a store
+      // that becomes unreadable between claim and run, not merely one that
+      // was never configured (already caught at request time). A failure
+      // here is persisted as ERROR, and neither the ReviewInvocation row nor
+      // reviewer.review() is ever created/called.
+      // The COMPLETE pre-spawn reconstruction (Milestone 2.3B seventh
+      // corrective pass). It is not enough to re-validate the current
+      // artifacts and then invoke the reviewer with the older persisted
+      // capsule: evidence that changed COHERENTLY after the request was
+      // created (artifact bytes and database projection both rewritten to a
+      // valid new state, each with correctly recomputed self-hashes) passes
+      // every internal-consistency check while describing a different run.
+      // The only thing that catches it is rebuilding the whole binding from
+      // current source-of-truth rows and requiring it to reproduce this
+      // request's identity exactly. A mismatch is STALE with no invocation
+      // row, no reviewer call, and no process -- Claude is never knowingly
+      // run against evidence whose verdict would have to be rejected later.
+      let prepared: PreparedReviewInvocation | null = null;
+      if (row.reviewAuthority === "AUTHORITATIVE") {
+        const reconstruction = await this.reconstructAuthoritativeBinding(row, reviewer);
+        if (!reconstruction.ok) {
+          const status = reconstruction.code === "EVIDENCE_CHANGED" ? "STALE" : "ERROR";
+          await this.finalizeNonVerdict(reviewRequestId, ownership, "RUNNING", status, reconstruction.reason, reconstruction.code, reconstruction.reason);
+          return;
+        }
+        prepared = reconstruction.prepared;
+      }
+
       // The reviewer receives exactly the validated, persisted, hash-bound
       // capsule and its validated, persisted, hash-bound configuration —
       // never task/execution fields re-assembled from live rows at run time,
@@ -642,18 +1343,65 @@ export class ReviewEngine {
       const capsule: ImmutableReviewCapsule = {
         ...bindingCheck.capsule,
         requestHash: row.requestHash,
-        ...(reviewer.id === "fake-reviewer" ? { scenario: fakeReviewerScenarioSchema.parse(bindingCheck.reviewerConfig) } : {})
+        reviewInputHash: row.reviewInputHash,
+        reviewerConfigHash: row.reviewerConfigHash,
+        ...(reviewer.id === "fake-reviewer" ? { scenario: fakeReviewerScenarioSchema.parse(bindingCheck.reviewerConfig) } : {}),
+        ...(reviewer.id === "claude-cli" ? { claudeReviewerConfig: claudeReviewerConfigSchema.parse(bindingCheck.reviewerConfig) } : {})
       };
 
-      let rawVerdict: StructuredReviewVerdict;
+      // Atomically creates the single ReviewInvocation row for this request
+      // (one transaction, re-proving the full ownership predicate together
+      // with the insert), before the reviewer is ever invoked. If ownership
+      // was already lost between the RUNNING transition above and here, or
+      // (should never happen given at-most-one-claim-ever) an invocation
+      // already exists, no row is created and reviewer.review() must never
+      // be called -- this is the atomic replacement for the old two-step
+      // check-then-create, which had a real (if narrow) TOCTOU gap.
       try {
-        rawVerdict = await reviewer.review(capsule, { signal: controller.signal, now: () => this.clock.now(), sleep: milliseconds => this.clock.sleep(milliseconds, controller.signal) });
+        invocationId = await this.createOwnedInvocationOrThrow(
+          reviewRequestId, reviewer.id, ownership, prepared,
+          capsule.claudeReviewerConfig?.capabilitySnapshotId ?? null,
+          capsule.claudeReviewerConfig ? { contractId: capsule.claudeReviewerConfig.wrapperContractId, parserVersion: capsule.claudeReviewerConfig.wrapperParserVersion } : null
+        );
       } catch (error) {
-        const current = await this.database.reviewRequest.findUnique({ where: { id: reviewRequestId }, select: { status: true } });
-        if (controller.signal.aborted || current?.status === "CANCELLATION_REQUESTED" || current?.status === "CANCELLED") {
+        if (error instanceof InvocationOwnershipLostError) {
           await this.resolveFinalizationRace(reviewRequestId, ownership);
           return;
         }
+        await this.finalizeNonVerdict(reviewRequestId, ownership, "RUNNING", "ERROR", "A ReviewInvocation could not be durably created for this review request.", "INVOCATION_CREATION_FAILED", error instanceof Error ? error.message : String(error));
+        return;
+      }
+
+      let rawVerdict: StructuredReviewVerdict;
+      try {
+        rawVerdict = await reviewer.review(capsule, {
+          signal: controller.signal,
+          now: () => this.clock.now(),
+          sleep: milliseconds => this.clock.sleep(milliseconds, controller.signal),
+          // The exact bytes already committed to the PREPARING row. The
+          // reviewer sends these verbatim; it never rebuilds them.
+          ...(prepared ? { prepared } : {}),
+          recordInvocation: record => this.persistReviewerInvocation(reviewRequestId, ownership, record),
+          markInvocationRunning: async processInfo => {
+            if (!invocationId) return { ok: false };
+            const ok = await this.markInvocationRunning(reviewRequestId, invocationId, ownership, processInfo);
+            if (!ok) handleHeartbeatOwnershipLoss("Review invocation could not be durably transitioned to RUNNING (ownership or lease no longer valid); aborting the active reviewer process.");
+            return { ok };
+          }
+        });
+      } catch (error) {
+        if (ownershipLost) {
+          invocationOutcome = "OWNERSHIP_LOST";
+          await this.resolveFinalizationRace(reviewRequestId, ownership);
+          return;
+        }
+        const current = await this.database.reviewRequest.findUnique({ where: { id: reviewRequestId }, select: { status: true } });
+        if (controller.signal.aborted || current?.status === "CANCELLATION_REQUESTED" || current?.status === "CANCELLED") {
+          invocationOutcome = "CANCELLED";
+          await this.resolveFinalizationRace(reviewRequestId, ownership);
+          return;
+        }
+        invocationOutcome = "FAILED";
         await this.finalizeNonVerdict(reviewRequestId, ownership, "RUNNING", "ERROR", "The reviewer failed to produce a result.", "ERROR", error instanceof Error ? error.message : String(error));
         return;
       }
@@ -661,18 +1409,22 @@ export class ReviewEngine {
 
       const parsedVerdict = structuredReviewVerdictSchema.safeParse(rawVerdict);
       if (!parsedVerdict.success) {
+        invocationOutcome = "FAILED";
         await this.finalizeNonVerdict(reviewRequestId, ownership, "RUNNING", "ERROR", "Reviewer output failed structured validation.", "ERROR", parsedVerdict.error.issues.map(issue => issue.message).join("; "));
         return;
       }
       if (parsedVerdict.data.reviewedRequestHash !== row.requestHash) {
+        invocationOutcome = "FAILED";
         await this.finalizeNonVerdict(reviewRequestId, ownership, "RUNNING", "ERROR", "Reviewer output does not reference the requested review's hash.", "ERROR", "reviewedRequestHash mismatch");
         return;
       }
 
+      invocationOutcome = "SUCCEEDED";
       await this.finalizeAcceptedVerdict(reviewRequestId, ownership, parsedVerdict.data);
     } finally {
       clearInterval(heartbeatTimer);
       this.controllers.delete(reviewRequestId);
+      if (invocationId) await this.finalizeInvocationStatus(reviewRequestId, ownership, invocationOutcome);
     }
   }
 
@@ -754,6 +1506,20 @@ export class ReviewEngine {
         } });
         return true;
       });
+      if (applied && row.ownerId) {
+        // Never reattach to or assume the prior owner's process is dead based
+        // on PID/lease-expiry alone: if that owner's invocation is still
+        // PREPARING (the only non-terminal state createOwnedInvocationOrThrow
+        // ever leaves a row in), it is CAS-updated to INTERRUPTED_UNCERTAIN
+        // (not silently left PREPARING forever, and never a terminal status
+        // implying a proven outcome) so requestReview's quarantine check
+        // blocks a new authoritative request until this is resolved. If no
+        // invocation row exists at all, reviewer.review() was never called
+        // for this request (it crashed before createOwnedInvocationOrThrow
+        // ever succeeded) -- no process was ever spawned, so there is
+        // nothing to quarantine at the invocation level, and this is a no-op.
+        await this.finalizeInvocationStatus(row.id, { ownerId: row.ownerId, leaseToken: row.leaseToken ?? "", claimAttempt: row.claimAttempts }, "INTERRUPTED_UNCERTAIN");
+      }
       if (applied) recovered += 1;
     }
     return recovered;
@@ -775,6 +1541,19 @@ export class ReviewEngine {
 
   listEvents(reviewRequestId: string, afterSequence = 0, limit = 100) {
     return this.database.reviewEvent.findMany({ where: { reviewRequestId, sequence: { gt: afterSequence } }, orderBy: { sequence: "asc" }, take: Math.min(Math.max(limit, 1), 250) });
+  }
+
+  /**
+   * The single ReviewInvocation row for a review (schema-enforced UNIQUE on
+   * reviewRequestId), or null if none has been created yet. Every field
+   * returned here is already safe for the API/UI layer: a status enum, a
+   * version string, and sha256 hex hashes -- never a raw executable path,
+   * stdout/stderr, or credential.
+   */
+  async latestInvocation(reviewRequestId: string): Promise<{ status: string; reviewerId: string; cliVersion: string; reviewMaterialHash: string; promptHash: string; createdAt: Date } | null> {
+    const invocation = await this.database.reviewInvocation.findUnique({ where: { reviewRequestId } });
+    if (!invocation) return null;
+    return { status: invocation.status, reviewerId: invocation.reviewerId, cliVersion: invocation.cliVersion, reviewMaterialHash: invocation.reviewMaterialHash, promptHash: invocation.promptHash, createdAt: invocation.createdAt };
   }
 
   /**

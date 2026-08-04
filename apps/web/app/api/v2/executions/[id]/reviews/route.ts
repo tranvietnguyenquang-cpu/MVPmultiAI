@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { relayV2ApiError } from "../../../../../../lib/relay-v2/api";
-import { getRelayV2ReviewServices, requireRelayV2Mutation, requireRelayV2Read } from "../../../../../../lib/relay-v2/server";
+import { getRelayV2ReviewServices, requireRelayV2Mutation, requireRelayV2Read, resolveFreshClaudeReviewerConfig } from "../../../../../../lib/relay-v2/server";
 import { v2ReviewProjectQuerySchema, v2ReviewRequestSchema } from "../../../../../../lib/relay-v2/contracts";
 import { ReviewNotFoundError } from "@project-relay/relay-v2-reviewer";
 
@@ -10,8 +10,14 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     const input = v2ReviewRequestSchema.parse(await request.json().catch(() => ({})));
     const projectId = v2ReviewProjectQuerySchema.parse(request.nextUrl.searchParams.get("projectId"));
     const { engine, runtime } = await getRelayV2ReviewServices();
+    // claude-cli's reviewerConfig is never accepted from the client (see
+    // v2ReviewRequestSchema) -- it is always freshly derived here from a
+    // verified, identity-checked local capability diagnostic.
+    const reviewerConfig = input.reviewerId === "claude-cli"
+      ? await resolveFreshClaudeReviewerConfig(engine)
+      : input.reviewerConfig;
     const result = await engine.requestReview((await params).id, projectId, input.reviewerId, "local-user", {
-      diagnostic: input.diagnostic, ...(input.reviewerConfig ? { reviewerConfig: input.reviewerConfig } : {})
+      diagnostic: input.diagnostic, ...(reviewerConfig ? { reviewerConfig } : {})
     });
     runtime.start();
     return NextResponse.json({ reviewRequest: result.reviewRequest, duplicate: result.duplicate }, { status: result.duplicate ? 200 : 201 });

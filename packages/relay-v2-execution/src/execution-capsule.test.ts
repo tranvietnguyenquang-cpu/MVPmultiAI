@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseHandoffText } from "@project-relay/relay-v2-domain";
+import { parseHandoffText, untruncatedProvenance } from "@project-relay/relay-v2-domain";
 import { buildExecutionCapsule, renderCodexPrompt } from "./execution-capsule.js";
 import type { GitEvidence } from "./workspace-evidence.js";
 
@@ -13,7 +13,7 @@ describe("execution capsule", () => {
     })).normalized;
     const baseline = {
       repositoryRoot: "C:\\workspace", branch: "relay-v2", head: "a".repeat(40), dirty: false, status: [], stagedCount: 0,
-      unstagedCount: 0, untrackedCount: 0, patchPreview: "", patchSha256: "b".repeat(64), patchTruncated: false,
+      unstagedCount: 0, untrackedCount: 0, patchPreview: "", patchSha256: "b".repeat(64), patchTruncated: false, patchProvenance: untruncatedProvenance(""),
       patchOmittedForSensitivePaths: false, capturedAt: "2026-08-02T00:00:00.000Z", evidenceHash: "c".repeat(64)
     } satisfies GitEvidence;
     const input = {

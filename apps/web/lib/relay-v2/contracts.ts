@@ -40,10 +40,16 @@ export const v2ExecutionProjectQuerySchema = z.string().uuid();
 export const v2ExecutionCursorSchema = z.coerce.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
 
 export const v2ReviewRequestSchema = z.object({
-  reviewerId: z.literal("fake-reviewer").default("fake-reviewer"),
+  reviewerId: z.enum(["fake-reviewer", "claude-cli"]).default("fake-reviewer"),
   diagnostic: z.boolean().default(false),
+  // Only meaningful for fake-reviewer. claude-cli's reviewerConfig is entirely
+  // server-derived from a freshly (re)verified capability diagnostic -- a
+  // client can never supply or influence it, so it must be absent here.
   reviewerConfig: fakeReviewerScenarioSchema.partial().optional()
-}).strict();
+}).strict().refine(value => value.reviewerId === "fake-reviewer" || value.reviewerConfig === undefined, {
+  message: "reviewerConfig is not accepted for claude-cli; the server derives it from verified capability diagnostics.",
+  path: ["reviewerConfig"]
+});
 export const v2ReviewCancelSchema = z.object({}).strict();
 export const v2ReviewProjectQuerySchema = z.string().uuid();
 export const v2ReviewCursorSchema = z.coerce.number().int().min(0).max(Number.MAX_SAFE_INTEGER);

@@ -17,6 +17,8 @@ import {
   taskPermissionSchema,
   taskStatusSchema,
   verificationOperationSchema,
+  EVIDENCE_ARTIFACT_SCHEMA_VERSION,
+  type ChangedFileEntry,
   type ExecutionEventLevel,
   type ExecutionEventType,
   type ExecutionOutcome,
@@ -32,6 +34,9 @@ import {
   type CodexCapabilitySnapshot
 } from "./codex-capabilities.js";
 import { SystemExecutionClock, type ExecutionClock } from "./clock.js";
+import {
+  buildChangedFilesArtifact, buildFinalGitArtifact, buildPatchArtifact, buildVerificationArtifact, verificationInnerTruncation
+} from "./evidence-envelopes.js";
 import { buildExecutionCapsule, executionCapsuleSchema } from "./execution-capsule.js";
 import { ExecutorRegistry } from "./executor-registry.js";
 import type { PreparedExecution, RelayExecutor } from "./executor-contract.js";
@@ -313,7 +318,13 @@ export class ExecutionEngine {
           await this.recordArtifact(session.id, await this.artifacts.writeArtifact(session.id, "CAPSULE", "execution-capsule.json", JSON.parse(session.capsuleJson)));
           await this.recordArtifact(session.id, await this.artifacts.writeArtifact(session.id, "BASELINE_GIT", "baseline-git.json", JSON.parse(session.baselineEvidenceJson)));
           const baselineEvidence = JSON.parse(session.baselineEvidenceJson) as GitEvidence;
-          if (baselineEvidence.patchPreview) await this.recordArtifact(session.id, await this.artifacts.writeArtifact(session.id, "PATCH", "baseline.patch", baselineEvidence.patchPreview));
+          if (baselineEvidence.patchPreview) {
+            const baselinePatch = buildPatchArtifact("BASELINE", baselineEvidence.head, baselineEvidence, []);
+            await this.recordArtifact(session.id, await this.artifacts.writeArtifact(
+              session.id, "PATCH", "baseline-patch.json", baselinePatch,
+              { schemaVersion: EVIDENCE_ARTIFACT_SCHEMA_VERSION, innerTruncation: baselinePatch.truncation }
+            ));
+          }
         } catch (error) {
           await this.blockSession(session.id, "ARTIFACT_WRITE_FAILED", error instanceof Error ? error.message : "Execution evidence could not be persisted.");
           throw new ExecutionAuthorityError("Execution evidence could not be persisted safely.");
@@ -401,7 +412,12 @@ export class ExecutionEngine {
     await this.database.executionArtifact.upsert({
       where: { sessionId_artifactType_relativePath: { sessionId, artifactType: metadata.artifactType, relativePath: metadata.relativePath } },
       create: { id: randomUUID(), sessionId, ...metadata },
-      update: { sha256: metadata.sha256, byteCount: metadata.byteCount, truncated: metadata.truncated }
+      update: {
+        sha256: metadata.sha256, byteCount: metadata.byteCount, truncated: metadata.truncated,
+        schemaVersion: metadata.schemaVersion, fullContentSha256: metadata.fullContentSha256,
+        originalByteCount: metadata.originalByteCount, omittedByteCount: metadata.omittedByteCount,
+        truncationMethod: metadata.truncationMethod, provenanceJson: metadata.provenanceJson
+      }
     });
   }
 
@@ -427,6 +443,10 @@ export class ExecutionEngine {
     let logTruncated = false;
     let timedOut = false;
     const changedFiles = new Set<string>();
+    /** Populated from the final Git delta; the authoritative changed-file set for the CHANGED_FILES artifact. */
+    let changedFileEntries: ChangedFileEntry[] = [];
+    /** True once the codex-cli final-evidence block completed, i.e. the changed-file set is known to be authoritative rather than merely absent. */
+    let wroteGitEvidence = false;
     let verificationResults: VerificationResult[] = [];
     let processResult: z.infer<typeof resultPayloadSchema> | undefined;
     let started = this.clock.now();
@@ -538,7 +558,11 @@ export class ExecutionEngine {
           await tx.executionSession.update({ where: { id: sessionId }, data: { verificationResultsJson: canonicalJson(verificationResults) } });
           await this.appendEventTx(tx, sessionId, "VERIFICATION_COMPLETED", passed ? "INFO" : "ERROR", passed ? "All approved verification operations passed." : "An approved verification operation failed.", { results: verificationResults });
         });
-        await this.recordArtifact(sessionId, await this.artifacts.writeArtifact(sessionId, "VERIFICATION", "verification-results.json", verificationResults));
+        const verificationArtifact = buildVerificationArtifact(verificationResults);
+        await this.recordArtifact(sessionId, await this.artifacts.writeArtifact(
+          sessionId, "VERIFICATION", "verification-results.json", verificationArtifact,
+          { schemaVersion: EVIDENCE_ARTIFACT_SCHEMA_VERSION, innerTruncation: verificationInnerTruncation(verificationArtifact) }
+        ));
         if (!passed) outcome = { status: "failed", summary: "Codex exited successfully, but Relay-owned verification failed.", failureCode: "VERIFICATION_FAILED" };
       }
     } catch (error) {
@@ -580,8 +604,27 @@ export class ExecutionEngine {
               unaccountedPreExistingPaths: delta.unaccountedPreExistingPaths
             });
           });
-          await this.recordArtifact(sessionId, await this.artifacts.writeArtifact(sessionId, "FINAL_GIT", "final-git.json", { evidence: capturedFinalEvidence, delta }));
-          if (capturedFinalEvidence.patchPreview) await this.recordArtifact(sessionId, await this.artifacts.writeArtifact(sessionId, "PATCH", "final.patch", capturedFinalEvidence.patchPreview));
+          // One in-memory evidence value drives BOTH the artifact bytes and
+          // the database projection written just above, so the reviewer's
+          // later canonical-equality check between them tests storage
+          // integrity rather than two independently assembled shapes.
+          const finalGitArtifact = buildFinalGitArtifact(capturedFinalEvidence, delta);
+          changedFileEntries = finalGitArtifact.changedFiles;
+          await this.recordArtifact(sessionId, await this.artifacts.writeArtifact(
+            sessionId, "FINAL_GIT", "final-git.json", finalGitArtifact,
+            { schemaVersion: EVIDENCE_ARTIFACT_SCHEMA_VERSION, innerTruncation: finalGitArtifact.truncation }
+          ));
+          // PATCH is required whenever anything changed, and is written even
+          // when the diff came back empty so its absence can never be
+          // confused with "there was nothing to show".
+          if (changedFileEntries.length || capturedFinalEvidence.patchPreview) {
+            const finalPatch = buildPatchArtifact("FINAL", baselineEvidence.head, capturedFinalEvidence, changedFileEntries);
+            await this.recordArtifact(sessionId, await this.artifacts.writeArtifact(
+              sessionId, "PATCH", "final-patch.json", finalPatch,
+              { schemaVersion: EVIDENCE_ARTIFACT_SCHEMA_VERSION, innerTruncation: finalPatch.truncation }
+            ));
+          }
+          wroteGitEvidence = true;
           if (outcome.status === "succeeded" && delta.forbiddenGitMutationSuspected) outcome = {
             status: "blocked",
             summary: "Relay detected a forbidden Git mutation or loss of protected pre-existing workspace state.",
@@ -592,11 +635,25 @@ export class ExecutionEngine {
         }
       }
       if (prepared && executor?.cleanup) await executor.cleanup(prepared, executionOutcomeSchema.parse(outcome)).catch(() => undefined);
-      await this.finalizeSession(sessionId, leaseToken, executionOutcomeSchema.parse(outcome), started, [...changedFiles], logTruncated);
+      // A codex-cli run's changed-file set comes from the Git delta and is
+      // authoritative. An executor that produces no Git evidence can only
+      // REPORT which paths it touched; that claim is still recorded, with null
+      // content hashes marking it as unproven, so a diagnostic session is not
+      // silently missing its changed-file artifact.
+      const reportedEntries: ChangedFileEntry[] = wroteGitEvidence
+        ? changedFileEntries
+        : [...changedFiles].sort().map(file => ({
+            path: file.replace(/\\/g, "/"), status: "modified" as const, renamedFrom: null,
+            binary: null, baselineSha256: null, finalSha256: null
+          }));
+      await this.finalizeSession(sessionId, leaseToken, executionOutcomeSchema.parse(outcome), started, reportedEntries, wroteGitEvidence || reportedEntries.length > 0, logTruncated);
     }
   }
 
-  private async finalizeSession(sessionId: string, leaseToken: string, outcome: ExecutionOutcome, started: Date, changedFiles: string[], logTruncated: boolean) {
+  private async finalizeSession(
+    sessionId: string, leaseToken: string, outcome: ExecutionOutcome, started: Date,
+    changedFiles: readonly ChangedFileEntry[], changedFileSetIsAuthoritative: boolean, logTruncated: boolean
+  ) {
     const now = this.clock.now();
     const mapping = {
       succeeded: { status: "SUCCEEDED", event: "EXECUTION_SUCCEEDED", level: "INFO", task: "AWAITING_USER_ACCEPTANCE" },
@@ -627,7 +684,19 @@ export class ExecutionEngine {
     });
     const log = await this.artifacts.finalizeLog(sessionId, logTruncated);
     await this.recordArtifact(sessionId, log);
-    if (changedFiles.length) await this.recordArtifact(sessionId, await this.artifacts.writeChangedFiles(sessionId, changedFiles));
+    // An empty change set is written as an explicit, valid, empty
+    // CHANGED_FILES artifact rather than by omitting the artifact: a reviewer
+    // must be able to tell "this run touched nothing" apart from "nobody
+    // recorded what this run touched". An AUTHORITATIVE review additionally
+    // requires the set to agree with the final Git evidence, so an executor
+    // that produces none can never have its unproven claim mistaken for one.
+    if (changedFileSetIsAuthoritative) {
+      const changedFilesArtifact = buildChangedFilesArtifact(changedFiles);
+      await this.recordArtifact(sessionId, await this.artifacts.writeArtifact(
+        sessionId, "CHANGED_FILES", "changed-files.json", changedFilesArtifact,
+        { schemaVersion: EVIDENCE_ARTIFACT_SCHEMA_VERSION, innerTruncation: changedFilesArtifact.truncation }
+      ));
+    }
   }
 
   async cancelSession(sessionId: string, actor = "local-user") {

@@ -3,6 +3,7 @@ import type { FakeReviewerScenario } from "@project-relay/relay-v2-domain";
 import { FakeReviewer } from "./fake-reviewer.js";
 import { computeRequestHash, computeReviewInputHash, type ReviewInputCapsule } from "./review-binding.js";
 import type { ImmutableReviewCapsule, ReviewControls } from "./reviewer-contract.js";
+import { EMPTY_EXECUTION_LOG_EVIDENCE } from "./review-binding.js";
 
 const HASH = "a".repeat(64);
 
@@ -27,17 +28,25 @@ function baseCapsule(): ReviewInputCapsule {
     executionCapsuleHash: HASH, executionCapsuleJsonHash: HASH,
     baselineGitEvidenceHash: HASH, finalGitEvidenceHash: HASH, verificationResultsHash: HASH, executionArtifactSetHash: HASH,
     finalBranch: "main", finalHead: "deadbeef",
-    requestedAt: "2026-08-02T00:00:00.000Z", reviewPolicyVersion: "2.3A-v1"
+    requestedAt: "2026-08-02T00:00:00.000Z", reviewPolicyVersion: "2.3A-v1",
+    taskConstraints: [], acceptanceCriteria: [],
+    approvedExecutorSelection: "FAKE", approvedModel: "AUTO", approvedEffort: "AUTO", approvedVerificationOperations: [],
+    baselineGitEvidence: { available: false, branch: "", head: "", dirty: false, changedFiles: [], diffPreview: "", diffTruncated: false, diffOmittedForSensitivePaths: false },
+    finalGitEvidence: { available: false, branch: "", head: "", dirty: false, changedFiles: [], diffPreview: "", diffTruncated: false, diffOmittedForSensitivePaths: false },
+    verificationEvidence: [], executionArtifactManifest: [],
+    executionLogEvidence: EMPTY_EXECUTION_LOG_EVIDENCE
   };
 }
 
 function capsule(scenario?: Partial<FakeReviewerScenario>): ImmutableReviewCapsule {
   const input = baseCapsule();
+  const reviewInputHash = computeReviewInputHash(input);
+  const reviewerConfigHash = "a".repeat(64);
   const requestHash = computeRequestHash({
-    reviewInputHash: computeReviewInputHash(input), reviewerConfigHash: "a".repeat(64),
+    reviewInputHash, reviewerConfigHash,
     reviewerId: input.reviewerId, reviewAuthority: input.reviewAuthority, requestedBy: "tester", attempt: 0, reviewPolicyVersion: input.reviewPolicyVersion
   });
-  return { ...input, requestHash, ...(scenario ? { scenario: scenario as FakeReviewerScenario } : {}) };
+  return { ...input, requestHash, reviewInputHash, reviewerConfigHash, ...(scenario ? { scenario: scenario as FakeReviewerScenario } : {}) };
 }
 
 function controls(signal = new AbortController().signal): ReviewControls {

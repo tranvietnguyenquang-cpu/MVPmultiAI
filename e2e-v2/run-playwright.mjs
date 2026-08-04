@@ -15,6 +15,10 @@ const environment = {
   // test-double session in this disposable browser-test environment only. Combined
   // with PROJECT_RELAY_TEST_MODE and the playwright-v2 data dir below; never on elsewhere.
   RELAY_V2_FAKE_REVIEWER_DIAGNOSTIC: "true",
+  // Swaps in the in-memory Claude CLI process double (never a real subprocess) for
+  // browser tests, mirroring RELAY_V2_CODEX_TEST_DOUBLE above; gated the same way
+  // (PROJECT_RELAY_TEST_MODE + this flag + the playwright-v2 data dir).
+  RELAY_V2_CLAUDE_TEST_DOUBLE: "true",
   RELAY_V2_ENABLED: "true",
   RELAY_V2_DATA_DIR: dataDir,
   RELAY_V2_E2E_DATA_DIR: dataDir,

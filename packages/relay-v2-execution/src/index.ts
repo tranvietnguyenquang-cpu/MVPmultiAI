@@ -13,3 +13,4 @@ export * from "./executor-registry.js";
 export * from "./execution-capsule.js";
 export * from "./workspace-evidence.js";
 export * from "./verification-catalog.js";
+export * from "./evidence-envelopes.js";

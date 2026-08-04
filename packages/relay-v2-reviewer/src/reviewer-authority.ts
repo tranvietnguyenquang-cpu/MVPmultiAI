@@ -1,14 +1,16 @@
 import type { ReviewAuthority, ReviewerSelection } from "@project-relay/relay-v2-domain";
 
 /**
- * Runtime reviewer id that an approved `ReviewerSelection` resolves to. Empty
- * in Milestone 2.3A: no Claude (or any other) reviewer is implemented yet, so
- * no `codex-cli` execution can receive an AUTHORITATIVE review through this
- * map. It exists as an injection point so the matching logic below is
- * provably correct without depending on a reviewer that does not exist yet.
+ * Runtime reviewer id that an approved `ReviewerSelection` resolves to.
+ * Milestone 2.3B populates CLAUDE -> "claude-cli": the first, and so far
+ * only, reviewer selection that can resolve to an AUTHORITATIVE verdict. NONE
+ * and an unmapped selection are unauthorizable by construction (see below);
+ * there is deliberately no CODEX entry yet.
  */
 export type ReviewerIdBySelection = Partial<Record<ReviewerSelection, string>>;
-export const PRODUCTION_REVIEWER_ID_BY_SELECTION: ReviewerIdBySelection = {};
+export const PRODUCTION_REVIEWER_ID_BY_SELECTION: ReviewerIdBySelection = {
+  CLAUDE: "claude-cli"
+};
 
 export type ReviewerAuthorityInput = {
   requestedReviewerId: string;

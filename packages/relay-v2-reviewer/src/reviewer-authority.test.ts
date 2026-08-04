@@ -83,9 +83,27 @@ describe("resolveReviewerAuthority", () => {
   });
 
   it("rejects a codex-cli review when no reviewer is mapped for the approved selection", () => {
-    const result = resolveReviewerAuthority(input({ executionExecutorId: "codex-cli", requestedReviewerId: "claude-reviewer", diagnosticRequested: false }));
+    // Milestone 2.3B maps CLAUDE -> "claude-cli" in the real production map, so this now
+    // exercises the CODEX selection, which still has no mapped reviewer of its own.
+    const result = resolveReviewerAuthority(input({
+      executionExecutorId: "codex-cli", approvalReviewerSelection: "CODEX", taskSelectedReviewer: "CODEX",
+      requestedReviewerId: "codex-reviewer", diagnosticRequested: false
+    }));
     expect(result.authorized).toBe(false);
     expect((result as { reason: string }).reason).toMatch(/No reviewer is available/);
+  });
+
+  it("resolves an AUTHORITATIVE claude-cli review through the real production reviewer mapping", () => {
+    const result = resolveReviewerAuthority(input({ executionExecutorId: "codex-cli", requestedReviewerId: "claude-cli", diagnosticRequested: false }));
+    expect(result).toMatchObject({ authorized: true, mode: "AUTHORITATIVE" });
+  });
+
+  it("rejects claude-cli reviewing a task approved for a different (unmapped) reviewer selection", () => {
+    const result = resolveReviewerAuthority(input({
+      executionExecutorId: "codex-cli", approvalReviewerSelection: "CODEX", taskSelectedReviewer: "CODEX",
+      requestedReviewerId: "claude-cli", diagnosticRequested: false
+    }));
+    expect(result.authorized).toBe(false);
   });
 
   it("rejects an unreviewable executor id", () => {

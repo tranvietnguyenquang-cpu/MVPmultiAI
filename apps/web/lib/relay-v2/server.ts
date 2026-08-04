@@ -3,6 +3,8 @@ import { getRelayV2Database } from "@project-relay/relay-v2-persistence";
 import { RelayV2Orchestrator } from "@project-relay/relay-v2-orchestrator";
 import { CodexCliExecutor, ExecutionArtifactStore, ExecutionEngine, ExecutionRuntimeHost, FakeExecutor } from "@project-relay/relay-v2-execution";
 import { FakeReviewer, ReviewEngine, ReviewRuntimeHost } from "@project-relay/relay-v2-reviewer";
+import { ClaudeCliReviewer, buildClaudeReviewerConfig } from "@project-relay/relay-v2-claude-reviewer";
+import type { ClaudeReviewerConfig } from "@project-relay/relay-v2-domain";
 import { ApiError } from "../api-errors.js";
 import { classifyRequest } from "../csrf.js";
 import { isLoopbackRequestHeaders } from "@project-relay/shared";
@@ -74,7 +76,7 @@ const reviewGlobal = globalThis as unknown as { relayV2ReviewServices?: Promise<
 export function getRelayV2ReviewServices(): Promise<RelayV2ReviewServices> {
   assertRelayV2ExecutionEnabled();
   reviewGlobal.relayV2ReviewServices ??= (async () => {
-    const { client } = await getRelayV2Database();
+    const { client, paths } = await getRelayV2Database();
     // FakeExecutor sessions are only reviewable in this explicit automated-test diagnostic mode,
     // never in a normal local or production runtime.
     const allowFakeExecutorDiagnosticReviews = process.env.PROJECT_RELAY_TEST_MODE === "true";
@@ -84,8 +86,31 @@ export function getRelayV2ReviewServices(): Promise<RelayV2ReviewServices> {
     const allowCodexTestDoubleDiagnosticReviews = process.env.PROJECT_RELAY_TEST_MODE === "true"
       && process.env.RELAY_V2_FAKE_REVIEWER_DIAGNOSTIC === "true"
       && Boolean(process.env.RELAY_V2_DATA_DIR?.includes("playwright-v2"));
-    const engine = new ReviewEngine(client, [new FakeReviewer()], { allowFakeExecutorDiagnosticReviews, allowCodexTestDoubleDiagnosticReviews });
+    const claudeReviewer = process.env.PROJECT_RELAY_TEST_MODE === "true" && process.env.RELAY_V2_CLAUDE_TEST_DOUBLE === "true"
+      ? (await import("./claude-reviewer-test-double.js")).createBrowserClaudeReviewerTestDouble()
+      : new ClaudeCliReviewer();
+    const engine = new ReviewEngine(client, [new FakeReviewer(), claudeReviewer], { allowFakeExecutorDiagnosticReviews, allowCodexTestDoubleDiagnosticReviews, artifactsRoot: paths.artifactsDir });
     return { engine, runtime: new ReviewRuntimeHost(engine) };
   })();
   return reviewGlobal.relayV2ReviewServices;
+}
+
+/**
+ * Builds a fresh, fully server-derived claude-cli reviewer config: refreshes
+ * the capability diagnostic if none is cached or the cached one has expired,
+ * then binds the config to whatever concrete, identity-checked snapshot that
+ * produced. A client request can never supply or influence any of these
+ * fields directly (see v2ReviewRequestSchema).
+ */
+export async function resolveFreshClaudeReviewerConfig(engine: ReviewEngine): Promise<ClaudeReviewerConfig> {
+  // id and diagnostic must always come from the exact same row -- see
+  // latestReviewerCapabilityRecord's docstring for the race this prevents.
+  let record = await engine.latestReviewerCapabilityRecord("claude-cli");
+  const isFresh = record !== null && new Date(record.diagnostic.expiresAt).getTime() > Date.now();
+  if (!isFresh) {
+    const refreshed = await engine.refreshReviewerCapabilities("claude-cli");
+    record = refreshed.snapshot && refreshed.snapshotId ? { id: refreshed.snapshotId, diagnostic: refreshed.snapshot } : null;
+  }
+  if (!record) throw new ApiError("FORBIDDEN", "Claude CLI capability could not be verified.");
+  return buildClaudeReviewerConfig(record.diagnostic, record.id);
 }

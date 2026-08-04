@@ -2,7 +2,8 @@ import { NextRequest } from "next/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
-  getReviewRequest: vi.fn()
+  getReviewRequest: vi.fn(),
+  latestInvocation: vi.fn()
 }));
 
 vi.mock("../../../../../lib/relay-v2/server", async importOriginal => {
@@ -10,7 +11,7 @@ vi.mock("../../../../../lib/relay-v2/server", async importOriginal => {
   return {
     ...actual,
     getRelayV2ReviewServices: async () => ({
-      engine: { getReviewRequest: mocks.getReviewRequest },
+      engine: { getReviewRequest: mocks.getReviewRequest, latestInvocation: mocks.latestInvocation },
       runtime: { start: vi.fn() }
     })
   };
@@ -34,13 +35,23 @@ describe("project-scoped review detail route", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.getReviewRequest.mockResolvedValue({ id: "review-1", projectId, status: "APPROVED" });
+    mocks.latestInvocation.mockResolvedValue(null);
   });
 
   it("allows the owning project to read the review", async () => {
     const response = await GET(request({ projectId }), { params: Promise.resolve({ id: "review-1" }) });
     expect(response.status).toBe(200);
-    const body = await response.json() as { reviewRequest: { id: string } };
+    const body = await response.json() as { reviewRequest: { id: string }; latestInvocation: unknown };
     expect(body.reviewRequest.id).toBe("review-1");
+    expect(body.latestInvocation).toBeNull();
+  });
+
+  it("includes the latest invocation status/hashes when one exists", async () => {
+    mocks.latestInvocation.mockResolvedValue({ status: "SUCCEEDED", reviewerId: "claude-cli", cliVersion: "2.1.220", reviewMaterialHash: "a".repeat(64), promptHash: "b".repeat(64), createdAt: new Date() });
+    const response = await GET(request({ projectId }), { params: Promise.resolve({ id: "review-1" }) });
+    const body = await response.json() as { latestInvocation: { status: string; cliVersion: string } };
+    expect(body.latestInvocation.status).toBe("SUCCEEDED");
+    expect(body.latestInvocation.cliVersion).toBe("2.1.220");
   });
 
   it("returns not found for the wrong project", async () => {

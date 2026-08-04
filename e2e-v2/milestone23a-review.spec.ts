@@ -57,6 +57,14 @@ test("requests a FakeReviewer review of a completed Codex test-double execution 
 
   await expect(page.getByRole("heading", { name: "Review Gate", exact: true })).toBeVisible();
   await expect(page.getByText("FakeReviewer is diagnostic-only", { exact: false })).toBeVisible();
+  // This task's approved reviewer selection is CLAUDE (see runCodexTestDoubleToSuccess),
+  // and Milestone 2.3B legitimately surfaces a real "Request Claude Review" action on the
+  // execution page for exactly that case -- this replaces the Milestone 2.3A guard that no
+  // Claude UI existed at all yet. Checked here, on the execution page, before navigating away
+  // to the review detail page below (the button does not exist there). The test never clicks
+  // it: it only exercises the FakeReviewer diagnostic scenario controls, so no real Claude CLI
+  // invocation happens in this test.
+  await expect(page.getByRole("button", { name: /request claude review/i })).toBeVisible();
   await page.getByLabel("Reviewer scenario").selectOption("approve");
   await page.getByRole("button", { name: "Request Review" }).click();
   await expect(page).toHaveURL(/\/v2\/reviews\/[0-9a-f-]+/);
@@ -68,7 +76,6 @@ test("requests a FakeReviewer review of a completed Codex test-double execution 
   await expect(page.getByRole("heading", { name: "Structured Verdict: APPROVE", exact: true })).toBeVisible();
   await expect(page.getByText("A review approval never commits, merges, or auto-accepts", { exact: false })).toBeVisible();
   await expect(page.getByRole("button", { name: /commit|push|merge|retry|deploy/i })).toHaveCount(0);
-  await expect(page.getByRole("button", { name: /claude/i })).toHaveCount(0);
 });
 
 test("displays REJECT findings with blocking severity", async ({ page }) => {

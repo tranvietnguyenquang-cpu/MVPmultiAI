@@ -24,7 +24,17 @@ export type ProcessResult = {
 
 export type ProcessRunnerEvent =
   | { type: "started"; ownership: ProcessOwnership }
-  | { type: "stdout" | "stderr"; message: string }
+  /**
+   * `rawByteCount` is the size of the ORIGINAL chunk this message was decoded
+   * and redacted from. It is what lets a consumer close the accounting between
+   * "bytes the process wrote" (ProcessResult.stdoutBytes/stderrBytes) and
+   * "bytes this consumer actually received", and therefore tell redaction
+   * apart from output the runner discarded at the cap. Optional only so a
+   * lightweight test double need not synthesize it -- a consumer that does not
+   * receive it must treat any reported output loss as UNATTRIBUTED rather than
+   * assuming its own stream was unaffected.
+   */
+  | { type: "stdout" | "stderr"; message: string; rawByteCount?: number }
   | { type: "warning"; message: string }
   | { type: "exit"; result: ProcessResult };
 
@@ -211,7 +221,7 @@ export class SafeProcessRunner implements ProcessRunner {
         outputTruncated = true;
         return;
       }
-      queue.push({ type, message: redactSecrets(chunk.toString("utf8")) });
+      queue.push({ type, message: redactSecrets(chunk.toString("utf8")), rawByteCount: chunk.byteLength });
     };
     child.stdout.on("data", (chunk: Buffer) => observe("stdout", chunk));
     child.stderr.on("data", (chunk: Buffer) => observe("stderr", chunk));
